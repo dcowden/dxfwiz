@@ -1,0 +1,88 @@
+schema_version: "1.0"
+units:
+  length: in            # in | mm
+  speed: in/min         # in/min | mm/min
+
+machine:
+  name: "My 3-Axis CNC Router"
+  type: router          # router | laser | plasma
+  axes: 3
+  max_tools: 1          # 1 means no tool changer; >1 means changer capacity
+  workholding: [clamps, screws, tape]
+  part_holding: [onionskin, tabs]
+  work_envelope:
+    x: { min: 0, max: 29.5 }    # placeholder — user to fill in
+    y: { min: 0, max: 19.7 }
+    z: { min: -3.15, max: 0 }
+  coordinate_system:
+    x_positive: right
+    y_positive: up
+    origin: bottom_left
+  spindle:
+    type: er11
+    max_rpm: 24000
+    min_rpm: 5000
+
+tools:
+  - id: t1
+    description: "1/8 flat 2-flute endmill"
+    type: flat_endmill
+    diameter: 0.125        #required
+    flutes: 2                #required
+    speed: 18000            # rpm, required
+    feed_rate: 60           # in/min, required
+    plunge_rate: 20         # in/min, required
+    depth_per_pass: 0.08 # optional, default to diameter
+    step_over: .0625  # optional, default to 1/2 diameter
+  - id: t2
+    description: "1/8 flat 1-flute endmill"
+    type: flat_endmill
+    diameter: 0.125
+    flutes: 1
+    speed: 18000
+    feed_rate: 80
+    plunge_rate: 25
+    depth_per_pass: 0.125 # optional, default to diameter
+    step_over: .0625  # optional, default to 1/2 diameter
+  - id: t3
+    description: "3/16 2-flute compression endmill"
+    type: compression_endmill
+    diameter: 0.1875
+    flutes: 2
+    speed: 18000
+    feed_rate: 70
+    plunge_rate: 20
+    depth_per_pass: 0.09375
+    step_over: 0.09375
+  - id: t4
+    description: "3/16 2-flute upcut endmill"
+    type: upcut_endmill
+    diameter: 0.1875
+    flutes: 2
+    speed: 18000
+    feed_rate: 75
+    plunge_rate: 25
+    depth_per_pass: 0.09375
+    step_over: 0.09375
+  - id: t5
+    description: "1/4 2-flute upcut endmill"
+    type: upcut_endmill
+    diameter: 0.25
+    flutes: 2
+    speed: 18000
+    feed_rate: 90
+    plunge_rate: 30
+    depth_per_pass: 0.125
+    step_over: 0.125
+  - id: t6
+    description: "1/4 1-flute upcut endmill"
+    type: upcut_endmill
+    diameter: 0.25
+    flutes: 1
+    speed: 18000
+    feed_rate: 110
+    plunge_rate: 35
+    depth_per_pass: 0.125
+    step_over: 0.125
+
+

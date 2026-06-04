@@ -45,3 +45,23 @@ The planner should use the machine config, and job_template to answer as many of
 
 now i think we're far enough to build the GUI element that we might use to interact with the user. the requirement is to build this as a nicegui application, so i can serve via web. all services used by the app should be fastapi services.  
 The first decision we have is how to render the dxf entities.  i am thinking svg and svg.js, because then we can include an svg in the bundle. But are there other alternatives we should consider? we should plan for the fact that the graphical display must allow showing the original geometry, the propose operations, and the proposed tool paths. before we commit to anything, lets realize that we face the problem of generating gcode and showing those tool paths. what tools can we use to do that? its not trivial at all, especially for pocketing-- so it makes sense to ask what visualization tools exist for gcode and what geometry-> gcode tools exist, before we build the UI. 
+
+
+
+
+we should not try to build this all in one go. lets start by building the SVG representation of the geometry in geom.yaml.  make a module for this with tests. use the tests/ouput folder to store the restuling svg for each example. since our integration stack is getting longer, lets refactor the tests so that we have one folder per test. inside of tests/dxf_clean, make a new folder for each example ( right now, three-- '2xintake', 'intakev4', and 'intake_frontv2' ). then, use those same folders under output, so that the outputs are grouped by input case.  since these tests also use the content in machine.yaml, lets prepare for richer, independent tests by putting a copy of machine.yaml as it exists now into each test-- the test should use that machine.yaml, not the current one . 
+
+(4) use the combination of machine.yaml and planner.yaml to generate an operation plan. if there are any questions remaining, ask the user
+(5) show a visual of the job, and interact with the operator. this phase includes gathering things we need that are not provided in the job template. In this phase the user can edit the op.yaml file directly
+
+(6) user can download the buntle, which has all the original dxf, fixed dxf, geom.yaml, and op.yaml, plus the code. 
+
+
+ok lets build a simple ui for now that goes as far as generating geom.yaml, but no further. we just need to stub out the ui elements for hte later bits. here's what we want this to look like:
+
+(0) the ui consists of a display area, a chat scroll text box, and a menu bar. for now, use my local machine.yaml and planner.yml, but later we'll let the user upload/maintain their own. the menu bar has settings on the far right. from the left, we have progress moving left to right. initially, there is a button that reads 'choose a dxf'.  later steps appear between markers like xya.dxf > next step > next step.  prioer steps are linkable-- clicking hte link goes back to that step
+(1) the initial view shows a 2-d view of our machine work area, and the details of our macine ( uom, size, preferred z stock position). 
+(2) user chooses a dx file
+(3) fix and generate geom.yaml. then display the fixed geomtry.  show part boundaries bolder, with outer bondaries in darker blue, and inner holes in lighter blue. show node markers between segments. that way, the user can easily see if we have separate entities or not. in practice this will help me validate our work so far. when you hover over an entity, show its type, number of nodes, etc.  If there is a frame, show it as green.
+
+create me a small run.cmd that will launch the nicegui app-- and you should use this too so i konw i'm rnning what you are running. 

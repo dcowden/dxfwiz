@@ -1,11 +1,13 @@
-from pathlib import Path
 from collections import Counter
+from dataclasses import dataclass
+from pathlib import Path
 
 import ezdxf
 import pytest
 
 from dxfwiz.dxf import CleanDxfConfig, clean_dxf, write_geometry_yaml
-from dxfwiz.schemas import GeometryFile
+from dxfwiz.schemas import GeometryFile, MachineFile
+from dxfwiz.svg import render_geometry_svg
 from dxfwiz.yaml_io import load_yaml_file
 
 
@@ -13,50 +15,107 @@ INPUT_DIR = Path(__file__).resolve().parent / "dxf_clean"
 OUTPUT_DIR = Path(__file__).resolve().parent / "output"
 
 
-def real_dxf_files() -> list[Path]:
+@dataclass(frozen=True)
+class DxfCase:
+    name: str
+    input_dir: Path
+    output_dir: Path
+    source_path: Path
+    machine_path: Path
+    fixed_path: Path
+    geom_path: Path
+    svg_path: Path
+
+
+def real_dxf_cases() -> list[DxfCase]:
     if not INPUT_DIR.exists():
         return []
-    return sorted(
-        path
-        for path in INPUT_DIR.iterdir()
-        if path.is_file() and path.suffix.lower() == ".dxf"
-    )
+    cases = []
+    for input_dir in sorted(path for path in INPUT_DIR.iterdir() if path.is_dir()):
+        dxf_paths = sorted(
+            path
+            for path in input_dir.iterdir()
+            if path.is_file() and path.suffix.lower() == ".dxf"
+        )
+        assert len(dxf_paths) == 1, f"Expected one DXF in {input_dir}"
+        source_path = dxf_paths[0]
+        machine_path = input_dir / "machine.yaml"
+        output_dir = OUTPUT_DIR / input_dir.name
+        cases.append(
+            DxfCase(
+                name=input_dir.name,
+                input_dir=input_dir,
+                output_dir=output_dir,
+                source_path=source_path,
+                machine_path=machine_path,
+                fixed_path=output_dir / f"{source_path.stem}_fixed.dxf",
+                geom_path=output_dir / f"{source_path.stem}_geom.yaml",
+                svg_path=output_dir / f"{source_path.stem}_geometry.svg",
+            )
+        )
+    return cases
 
 
-@pytest.mark.parametrize("source_path", real_dxf_files(), ids=lambda path: path.name)
-def test_real_dxf_cleaning_outputs_fixed_dxf_and_geom_yaml(source_path):
-    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-    stem = source_path.stem
-    fixed_path = OUTPUT_DIR / f"{stem}_fixed.dxf"
-    geom_path = OUTPUT_DIR / f"{stem}_geom.yaml"
+def dxf_case(name: str) -> DxfCase:
+    return next(case for case in real_dxf_cases() if case.name == name)
 
-    source_count = _entity_count(source_path)
+
+def ensure_case_outputs(case: DxfCase) -> None:
+    case.output_dir.mkdir(parents=True, exist_ok=True)
+    if not case.fixed_path.exists():
+        clean_dxf(case.source_path, case.fixed_path, _clean_config())
+    if not case.geom_path.exists():
+        write_geometry_yaml(
+            case.fixed_path,
+            case.geom_path,
+            original_file=case.source_path.name,
+            cleaned_file=case.fixed_path.name,
+        )
+
+
+@pytest.mark.parametrize("case", real_dxf_cases(), ids=lambda case: case.name)
+def test_real_dxf_cleaning_outputs_fixed_dxf_and_geom_yaml(case):
+    case.output_dir.mkdir(parents=True, exist_ok=True)
+
+    MachineFile.model_validate(load_yaml_file(case.machine_path))
+    source_count = _entity_count(case.source_path)
     result = clean_dxf(
-        source_path,
-        fixed_path,
-        CleanDxfConfig(
-            gap_tolerance=0.005,
-            duplicate_tolerance=0.0005,
-            min_segment_length=0.001,
-        ),
+        case.source_path,
+        case.fixed_path,
+        _clean_config(),
     )
     geom_data = write_geometry_yaml(
-        fixed_path,
-        geom_path,
-        original_file=source_path.name,
-        cleaned_file=fixed_path.name,
+        case.fixed_path,
+        case.geom_path,
+        original_file=case.source_path.name,
+        cleaned_file=case.fixed_path.name,
     )
 
-    fixed_count = _entity_count(fixed_path)
-    GeometryFile.model_validate(load_yaml_file(geom_path))
+    fixed_count = _entity_count(case.fixed_path)
+    GeometryFile.model_validate(load_yaml_file(case.geom_path))
 
-    assert fixed_path.exists()
-    assert geom_path.exists()
+    assert case.fixed_path.exists()
+    assert case.geom_path.exists()
     assert source_count > 0
     assert fixed_count > 0
     assert fixed_count == result.closed_loops + result.open_paths
     assert geom_data["summary"]["entity_count"] == fixed_count
     assert geom_data["units"]["length"] == "in"
+
+
+@pytest.mark.parametrize("case", real_dxf_cases(), ids=lambda case: case.name)
+def test_real_dxf_geometry_svg_is_written(case):
+    ensure_case_outputs(case)
+
+    svg = render_geometry_svg(case.geom_path, case.fixed_path, case.svg_path)
+    geom_data = load_yaml_file(case.geom_path)
+
+    assert case.svg_path.exists()
+    assert svg.startswith('<svg xmlns="http://www.w3.org/2000/svg"')
+    assert svg.count('data-entity-id="') == geom_data["summary"]["entity_count"]
+    assert "shape-circle" in svg
+    if case.name != "intake_frontv2":
+        assert "role-frame" in svg
 
 
 def test_real_dxf_cleaning_summary_file_is_written():
@@ -66,17 +125,14 @@ def test_real_dxf_cleaning_summary_file_is_written():
         "file,source_entities,fixed_entities,closed_loops,open_paths,ignored,zero_length_removed,duplicates_removed,endpoints_snapped,warnings"
     ]
 
-    for source_path in real_dxf_files():
-        stem = source_path.stem
-        fixed_path = OUTPUT_DIR / f"{stem}_fixed.dxf"
-        source_count = _entity_count(source_path)
-        fixed_count = _entity_count(fixed_path) if fixed_path.exists() else 0
-        result = clean_dxf(source_path, fixed_path)
-        fixed_count = _entity_count(fixed_path)
+    for case in real_dxf_cases():
+        source_count = _entity_count(case.source_path)
+        result = clean_dxf(case.source_path, case.fixed_path)
+        fixed_count = _entity_count(case.fixed_path)
         lines.append(
             ",".join(
                 [
-                    source_path.name,
+                    case.source_path.name,
                     str(source_count),
                     str(fixed_count),
                     str(result.closed_loops),
@@ -96,8 +152,9 @@ def test_real_dxf_cleaning_summary_file_is_written():
 
 
 def test_2xintakev3_geometry_matches_screenshot_expectations():
-    geom_path = OUTPUT_DIR / "2xintakev3_and_2xkickerv1_geom.yaml"
-    data = load_yaml_file(geom_path)
+    case = dxf_case("2xintake")
+    ensure_case_outputs(case)
+    data = load_yaml_file(case.geom_path)
     entities = {entity["id"]: entity for entity in data["entities"]}
 
     assert Counter(entity["shape"] for entity in data["entities"]) == {
@@ -133,8 +190,9 @@ def test_2xintakev3_geometry_matches_screenshot_expectations():
 
 
 def test_intake_front_geometry_matches_screenshot_expectations():
-    geom_path = OUTPUT_DIR / "intake_frontv2_geom.yaml"
-    data = load_yaml_file(geom_path)
+    case = dxf_case("intake_frontv2")
+    ensure_case_outputs(case)
+    data = load_yaml_file(case.geom_path)
     entities = {entity["id"]: entity for entity in data["entities"]}
 
     assert Counter(entity["shape"] for entity in data["entities"]) == {
@@ -154,8 +212,9 @@ def test_intake_front_geometry_matches_screenshot_expectations():
 
 
 def test_intakev4_geometry_matches_screenshot_expectations():
-    geom_path = OUTPUT_DIR / "intakev4_geom.yaml"
-    data = load_yaml_file(geom_path)
+    case = dxf_case("intakev4")
+    ensure_case_outputs(case)
+    data = load_yaml_file(case.geom_path)
     entities = {entity["id"]: entity for entity in data["entities"]}
 
     assert data["units"]["length"] == "in"
@@ -201,8 +260,9 @@ def test_intakev4_geometry_matches_screenshot_expectations():
 
 
 def test_intakev4_largest_part_has_17_circular_holes():
-    geom_path = OUTPUT_DIR / "intakev4_geom.yaml"
-    data = load_yaml_file(geom_path)
+    case = dxf_case("intakev4")
+    ensure_case_outputs(case)
+    data = load_yaml_file(case.geom_path)
     entities = {entity["id"]: entity for entity in data["entities"]}
     populated_frame = next(
         frame
@@ -225,6 +285,14 @@ def test_intakev4_largest_part_has_17_circular_holes():
 
 def _entity_count(path: Path) -> int:
     return len(list(ezdxf.readfile(path).modelspace()))
+
+
+def _clean_config() -> CleanDxfConfig:
+    return CleanDxfConfig(
+        gap_tolerance=0.005,
+        duplicate_tolerance=0.0005,
+        min_segment_length=0.001,
+    )
 
 
 def _box_area(box: dict) -> float:
