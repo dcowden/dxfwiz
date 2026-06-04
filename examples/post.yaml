@@ -1,0 +1,57 @@
+schema_version: "1.0"
+units:
+  length: in            # in | mm — controls G20/G21 in output
+  speed: in/min         # in/min | mm/min
+
+post:
+  name: "UCCNC"
+  description: "Post processor for UCCNC controller"
+  file_extension: ".nc"
+
+  formatting:
+    line_numbers: true
+    line_number_start: 10
+    line_number_increment: 10
+    decimal_places: 4
+    comment_style: parentheses   # parentheses | semicolon
+    block_delete: "/"
+    spaces_between_words: true
+
+  motion:
+    positioning_mode: absolute    # G90
+    arc_mode: incremental_ij      # G91.1 — IJ relative to arc start
+    arc_plane: G17                # XY plane
+    rapid: G0
+    linear: G1
+    cw_arc: G2
+    ccw_arc: G3
+
+  spindle:
+    cw: M3
+    ccw: M4
+    stop: M5
+    speed_word: S
+
+  coolant:
+    flood_on: M8
+    mist_on: M7
+    off: M9
+
+  tool_change:
+    command: M6
+    tool_word: T
+    length_comp: G43
+    length_comp_cancel: G49
+    pre_change_position: null
+    manual_pause: true
+
+  program:
+    start_codes: ["G90", "G20", "G17", "G40", "G49"]
+    end_codes: ["M5", "M9", "G28 G91 Z0", "M30"]
+    optional_stop: M1
+    program_end: M30
+
+  safety:
+    retract_mode: G28
+    safe_z: 0.2              # inches above work for rapids
+    feed_rate_mode: units_per_min  # G94

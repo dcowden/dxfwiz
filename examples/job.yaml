@@ -1,0 +1,71 @@
+schema_version: "1.0"
+units:
+  length: in
+  speed: in/min
+
+job:
+  name: "Bearing Pillow Block"
+  description: "Machine a bearing pillow block from 1/4 plywood"
+  created: "2026-06-03"
+  geometry_file: "bearing_block_geom.yaml"
+  machine: "machine.yaml"
+  post: "post.yaml"
+  planner: "planner.yaml"
+
+stock:
+  material: plywood
+  thickness: 0.25
+  z_zero: stock_top
+  origin_location: bottom_left
+
+coordinate_system: G55
+
+operations:
+  - id: op1
+    type: contour
+    description: "Outer profile with tabs"
+    entity: e1
+    offset: outside #other choices: inside, none.
+    tool: t5
+    depth: 0.25               # full depth
+    milling_direction: climb
+    finishing_allowance: 0.0
+    tabs:   #must be optional
+      enabled: true
+      width: 0.2
+      height: 0.06
+      count: 4
+    lead_in: { type: arc, radius: 0.12 } #must be optional
+
+  - id: op2
+    type: drill
+    description: "Left mounting hole"
+    entity: e2
+    tool: t1
+    depth: 0.25
+    peck_depth: 0.12
+    retract_amount: 0.04
+    dwell_time: 0.5
+
+  - id: op3
+    type: drill
+    description: "Right mounting hole"
+    entity: e3
+    tool: t1
+    depth: 0.25
+    peck_depth: 0.12
+    retract_amount: 0.04
+    dwell_time: 0.5
+
+  - id: op4
+    type: pocket
+    description: "Center bearing pocket"
+    entity: e4
+    tool: t5
+    depth: 0.125              # partial depth pocket
+    stepover_percent: 40
+    strategy: parallel
+    milling_direction: climb
+    finishing_pass:
+      enabled: true
+      allowance: 0.004

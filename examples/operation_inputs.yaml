@@ -1,0 +1,23 @@
+schema_version: "1.0"
+
+inputs:
+  - name: stock_size
+    description: "Overall stock dimensions for the job."
+    sources: [geom, planner, user]
+    required: true
+  - name: stock_material
+    description: "Material being cut."
+    sources: [planner, user]
+    required: true
+  - name: workholding_method
+    description: "How the material is held to the machine."
+    sources: [machine, planner, user]
+    required: true
+  - name: z_zero_position
+    description: "Whether Z zero is stock top or spoilboard top."
+    sources: [planner, user]
+    required: true
+  - name: coordinate_system
+    description: "Work offset such as G54 or G55."
+    sources: [planner, user]
+    required: true

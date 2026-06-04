@@ -1,0 +1,27 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "dxfwiz"
+version = "0.1.0"
+description = "YAML-first 2.5D CNC router workflow tools."
+readme = "prompt.md"
+requires-python = ">=3.13"
+dependencies = [
+    "ezdxf>=1.4",
+    "pydantic>=2.8",
+    "ruamel.yaml>=0.18",
+    "shapely>=2.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.2",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100

@@ -1,0 +1,92 @@
+schema_version: "1.0"
+units:
+  length: in
+  source: guessed
+  confidence: 0.86
+  coordinate_scale: 1.0
+  evidence:
+    - "DXF $INSUNITS is missing or unitless"
+    - "inch interpretation gives plausible 3.9 in max extent"
+    - "2 circular holes match common in sizes"
+
+source:
+  original_file: "bearing_block_original.dxf"
+  cleaned_file: "bearing_block_fixed.dxf"
+  format: dxf
+
+summary:
+  entity_count: 5
+  closed_count: 4
+  open_count: 1
+  bounding_box:
+    min: { x: 0.0, y: 0.0 }
+    max: { x: 3.94, y: 2.36 }
+
+entities:
+  - id: e1
+    type: closed_loop
+    shape: rectangle
+    source_refs:
+      - { kind: dxf_handle, value: "A1" }
+      - { kind: dxf_handle, value: "A2" }
+      - { kind: dxf_handle, value: "A3" }
+      - { kind: dxf_handle, value: "A4" }
+    bounding_box: { min: { x: 0.0, y: 0.0 }, max: { x: 3.94, y: 2.36 } }
+    area: 9.3
+    perimeter: 12.6
+
+  - id: e2
+    type: closed_loop
+    shape: circle
+    source_refs:
+      - { kind: dxf_handle, value: "B1" }
+    center: { x: 0.59, y: 1.18 }
+    diameter: 0.25
+    area: 0.049
+    perimeter: 0.785
+
+  - id: e3
+    type: closed_loop
+    shape: circle
+    source_refs:
+      - { kind: dxf_handle, value: "B2" }
+    center: { x: 3.35, y: 1.18 }
+    diameter: 0.25
+    area: 0.049
+    perimeter: 0.785
+
+  - id: e4
+    type: closed_loop
+    shape: rectangle
+    source_refs:
+      - { kind: dxf_handle, value: "C1" }
+      - { kind: dxf_handle, value: "C2" }
+      - { kind: dxf_handle, value: "C3" }
+      - { kind: dxf_handle, value: "C4" }
+    bounding_box: { min: { x: 1.38, y: 0.59 }, max: { x: 2.56, y: 1.77 } }
+    area: 1.39
+    perimeter: 4.72
+
+  - id: e5
+    type: open_path
+    shape: line
+    source_refs:
+      - { kind: dxf_handle, value: "D1" }
+    bounding_box: { min: { x: 0.39, y: 2.17 }, max: { x: 1.57, y: 2.17 } }
+
+containment_tree:
+  - entity: e1
+    role: outer_boundary
+    children:
+      - entity: e2
+        role: hole_candidate
+        children: []
+      - entity: e3
+        role: hole_candidate
+        children: []
+      - entity: e4
+        role: hole_candidate
+        children: []
+  - entity: e5
+    role: uncontained
+    children: []
