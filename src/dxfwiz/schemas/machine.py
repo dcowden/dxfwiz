@@ -32,6 +32,7 @@ class Machine(StrictModel):
     type: Literal["router", "laser", "plasma"]
     axes: int = Field(ge=2, le=3)
     max_tools: int = Field(ge=1)
+    clear_z: float
     workholding: list[WorkholdingOption]
     part_holding: list[PartHoldingOption]
     work_envelope: WorkEnvelope
@@ -42,7 +43,8 @@ class Machine(StrictModel):
 class Tool(StrictModel):
     id: str
     description: str
-    type: str
+    end_type: Literal["flat", "ball", "o-flute"]
+    flute_spiral: Literal["straight", "downcut", "upcut", "compression"]
     diameter: float = Field(gt=0)
     flutes: int = Field(gt=0)
     speed: int = Field(gt=0)

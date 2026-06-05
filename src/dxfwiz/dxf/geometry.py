@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from typing import Any
 
@@ -14,6 +15,7 @@ from dxfwiz.dxf.units import determine_length_units
 
 FLATTENING_DISTANCE = 0.01
 RECTANGLE_TOLERANCE = 1e-3
+logger = logging.getLogger(__name__)
 
 
 def write_geometry_yaml(
@@ -24,6 +26,7 @@ def write_geometry_yaml(
     length_units: str | None = None,
 ) -> dict[str, Any]:
     fixed_dxf_path = Path(fixed_dxf_path)
+    logger.info("Writing geometry YAML from fixed DXF %s", fixed_dxf_path)
     doc = ezdxf.readfile(fixed_dxf_path)
     msp = doc.modelspace()
 
@@ -85,6 +88,14 @@ def write_geometry_yaml(
         "entities": entities,
     }
     _dump_geometry_yaml(geom_yaml_path, data)
+    logger.info(
+        "Wrote geometry YAML %s (%d entities, %d ignored, units=%s/%s)",
+        geom_yaml_path,
+        len(entities),
+        data["summary"]["ignored_count"],
+        units["length"],
+        units["source"],
+    )
     return data
 
 

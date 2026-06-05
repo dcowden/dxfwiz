@@ -296,6 +296,20 @@ Chat behavior:
 - The large empty area should be the log, not a mysterious input area.
 - Chat planning behavior is stubbed for now.
 
+Operation planning behavior:
+
+- The UI must call the same stateless FastAPI planning endpoint exposed to external clients.
+- The planning endpoint accepts geometry, machine, system planner advice, user planner advice, and user inputs in the request body.
+- The endpoint response always has the same structure: `errors`, `warnings`, `plan`, and `op_yaml`.
+- `plan` may be empty/null when required inputs are missing or blocking planning errors exist.
+- The first UI planning output is the generated `op.yaml` source for review and iteration.
+
+System planner advice:
+
+- Built-in planner assumptions live in `src/dxfwiz/planning/system_planner_advice.yaml`.
+- User advice from `planner.yaml` is combined with system advice when generating a plan.
+- System advice is not a source of missing inputs; it is used to guide plan generation and produce warnings/errors.
+
 ## Service Architecture
 
 Use service objects for workflow steps. The current UI has a `ProjectService` that:

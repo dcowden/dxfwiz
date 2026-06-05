@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from math import atan2, isclose, radians, tan
 from pathlib import Path
@@ -9,6 +10,7 @@ import ezdxf
 
 
 Point = tuple[float, float]
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -64,11 +66,14 @@ def clean_dxf(
     input_path = Path(input_path)
     output_path = Path(output_path)
     result = CleanDxfResult(input_path=input_path, output_path=output_path)
+    logger.info("Cleaning DXF %s -> %s", input_path, output_path)
+    logger.debug("DXF cleaner config: %s", config)
 
     doc = ezdxf.readfile(input_path)
     msp = doc.modelspace()
     source_entities = list(msp)
     result.entities_read = len(source_entities)
+    logger.info("Read %d source DXF entities", result.entities_read)
 
     segments: list[Segment] = []
     closed_entities = []
@@ -105,6 +110,7 @@ def clean_dxf(
     result.open_paths = len(open_chains)
     if open_chains:
         result.warnings.append(f"{len(open_chains)} open path(s) remain after cleanup")
+        logger.info("%d open path(s) remain after cleanup", len(open_chains))
 
     out_doc = ezdxf.new("R2000")
     out_doc.units = doc.units
@@ -126,6 +132,13 @@ def clean_dxf(
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     out_doc.saveas(output_path)
+    logger.info(
+        "Wrote fixed DXF %s (%d closed loop(s), %d open path(s), %d duplicate(s) removed)",
+        output_path,
+        result.closed_loops,
+        result.open_paths,
+        result.duplicates_removed,
+    )
     return result
 
 

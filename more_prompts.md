@@ -64,4 +64,199 @@ ok lets build a simple ui for now that goes as far as generating geom.yaml, but 
 (2) user chooses a dx file
 (3) fix and generate geom.yaml. then display the fixed geomtry.  show part boundaries bolder, with outer bondaries in darker blue, and inner holes in lighter blue. show node markers between segments. that way, the user can easily see if we have separate entities or not. in practice this will help me validate our work so far. when you hover over an entity, show its type, number of nodes, etc.  If there is a frame, show it as green.
 
-create me a small run.cmd that will launch the nicegui app-- and you should use this too so i konw i'm rnning what you are running. 
+its important to design the ui realizing that hte user could start with a dxf, but in the future they could start with a dxf and a geom.yaml file (later meaning, whe nother tools can do the geometry recognition ).
+
+create me a small run.cmd that will launch the nicegui app-- and you should use this too so i know i'm running what you are running. 
+
+before you write this, ask me any clarifying questions.
+
+
+
+
+ok i had a look at this version.  (1) lets not show the job on the full workspace on the planning screen-- lets just show the job itself based on geom. we'll place the job into the machine in the next step. (2) in the chat, i had asked earlier to show all of our advice, but lets not do that, it takes too much space. add menu bar items that allow showing planner.yaml and machine.yaml. you can open those in a popup with a button to dismiss.  (3) in the chat make it more clear which planning in puts are required and what you have.  To do that, make a more clear set of input: value pairs. present them as cards or some other clever layout with three values: in bold: what the thing is, then, where you got it, and an editable place to override.   for example, in my case, you got stock details from machine.yaml.  These come from the operation_inputs.yaml file.
+
+this editable area probably needs three lines to fit in the right pane.
+when editing, use drop down lists for things with constrained values. that includes the stock thickness unit of measure, the materials list ( for now, plywood, polycarbonate), the tool or tools, the workholding method, stock origin, and coordinate system.  you an use collabsable elements if needed.  the generate plan button should be disabled if you dont have all the inputs you need.
+
+(4) we need a separate pane to summarize what we found in the geometry. the information in the summary is fine, but use two-colume item: value format, and make it look nice. use a collapseable pane above the area for inputs.  that one can be collapsible too.  so we'll have four sections in that right pane: geometry summary, operation inputs, text entry, and generate plan button.  
+
+
+ok time for the exciting part-- the planning step!
+
+almost all of the advice needed can be mentioned in the operation_advice area. i've added a new section called strategies.
+
+I've now realized that it important to show the entity names in the geometry output.  Show these with a green font, large enough to see easily ( larger than other items), with a leader pointing to entity.  this is crucial, because that way, i can simply type "e2 should be a pocket x deep".  
+
+i realized we need to add clear_z to the machine.yaml 
+
+for tools, we need a new key flute_spiral, with choices straight, downcut, upcut, and compressions cut.  change type to end_type, choices flat, ball, o-flute
+
+Lets add a new file called system_planner_advice.yaml, that's inside the source tree. this advice should be used together with the user provided planner.yaml. It contains things that the planner should handle, but that an experienced user would assume are already checked.  Many of these things will result in planning errors we'll have the user handle on the next page. These are not missing inputs: they are problems that have been found based on the provided inputs.  These should be categorized using the same keys as in the planner.yaml.  The keys are veyr useful for the ai to understand what each one's advice is for. Here are a few entries to get us started:
+
+workholding:
+   - if using tabs, the tabs should be 0.06" tall for polycarbonate, 0.1" tall for wood or plywood
+   - tabs should be placed on linear segments. if enough locations are not available, warn the user
+   - tab width should be 1x material thickness
+   - if tabs are used, try to get 4 tabs per part, plus 1 tab every 10x the thickness of material. of length if four was not enough.  if there are insiffucieint places for tabs on straight locations, warn the user  
+   - place tabs opposite each other as possible.
+   - if using screws, screw locations should be placed in areas where there will be scrap.
+   - pre-drill screw locations using the same bit as will be used for the job, if the job is a one tool job. 
+   - if not a one tool job, pre-trill the screw locations with the smallest tool available
+   - screw locations should be placed somewhere about 1 two square feet.
+   - always put screws in the four corners of the stock, if using screw workholding.
+
+strategies:
+   - always start by inspecting the geometry, and find the largest tool diameter that will do the job.  
+   - only use 1/8 inch tools if necessary to meet criteria
+   - always generate transition ramps into the cut
+   - always plan the job in this order: holes for screws, interior pockets, interior holes, outer boundaries. 
+   - use feedrates associated with the tools, unless specified otherwise
+   - use climb cutting for finishing passes use conventional cutting for roughing passes that are 
+   - always use climb cutting on plastics and compression cutters.
+   - for aluminum, use conventional for all passes except finishing passes.
+
+put all those into system_planner_advice.yaml. Then, go do some cnc router research, and add additional strategies, workholding, and tool advice that is important for cnc routers.  Then, i'll ajudst later.
+
+build a python service that accepts a geom.yaml, system_planning_advice object, user planning advice, user inputs, and generates an operation plan object.  This service interface is crucial because it will also be a standalone web service. make sure to design a response object that ahndles errors and warnings, in addition to sending the proposed plan.  the response should always be the same structure-- errors, warnings, and a place for a plan object--though it is permissible for the plan to be empty.  package this esrvice in a fastapi endpoint, and make sure that the fastapi endpoint is used from the ui.  I want the ui to use the same endpoint as is available outside the ui.
+
+its very important that this endpoint is stateless-- we dont want it reading the local filesystem. This may mean we need to include the machine object as input as well, but i'm not sure.  
+
+
+
+In the ui, as this first step, just show the output op.yaml source till we get it tweaked in.
+
+with that done, i think you should be able to make a plan. use examples/job.yaml as an example. 
+  
+
+ok this is looking really good! changes:
+
+changes to settings:
+(1) see picture 1: the machine yaml is partially cut off ( the planner looks fine) 
+(2) in settings, lets avoid the double-scrolling. instead of having both texts having their own scroll, just let them be full length and use the main window scroll.
+
+operation planning:
+(1) when completing a section that's missing data, it should go to green once the data is supplied ( so i know what i have is acceptable).  give a green check icon and red x icon in the title bar to make it clear. ( all sections that are ok should be green checkmarks).
+(2) add a visual indicator ( green checkmark, red x icon) to the create a plan button whenever it can be clicked. 
+(3) add a toolbar above the graphics area but below the main menu. put the zoom to extents button in that bar. also put buttons to rotate the geometry 90 dgrees left and right ( use the conventional rotate triagle icons for that).  make sure to re-generate all the labels when that happens so they are readable!
+(4) add zoom in and zoom out buttons in that toolbar
+(5) add button to show /hide entity labels and dimension labels ( start with these layers enabled. these buttons should be the type that appear depressed and undepressed when toggled
+(6) the zoom extents button still doesn't do anything, i think it could be due to this exception but im not sure: 
+
+The parent element this slot belongs to has been deleted.
+Traceback (most recent call last):
+  File "C:\Users\davec\gitwork\dxfwiz\.venv\Lib\site-packages\nicegui\events.py", line 480, in _await_and_handle_in_context
+    await awaitable
+  File "C:\Users\davec\gitwork\dxfwiz\src\dxfwiz\ui\app.py", line 660, in handle_upload
+    ui.notify("geom.yaml generated", type="positive")
+    ~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\davec\gitwork\dxfwiz\.venv\Lib\site-packages\nicegui\functions\notify.py", line 52, in notify
+    client = context.client
+             ^^^^^^^^^^^^^^
+  File "C:\Users\davec\gitwork\dxfwiz\.venv\Lib\site-packages\nicegui\context.py", line 41, in client
+    return self.slot.parent.client
+           ^^^^^^^^^^^^^^^^
+  File "C:\Users\davec\gitwork\dxfwiz\.venv\Lib\site-packages\nicegui\slot.py", line 31, in parent
+    raise RuntimeError('The parent element this slot belongs to has been deleted.')
+RuntimeError: The parent element this slot belongs to has been deleted.
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "C:\Users\davec\gitwork\dxfwiz\.venv\Lib\site-packages\nicegui\background_tasks.py", line 152, in _handle_exceptions
+    task.result()
+    ~~~~~~~~~~~^^
+  File "C:\Users\davec\gitwork\dxfwiz\.venv\Lib\site-packages\nicegui\events.py", line 482, in _await_and_handle_in_context
+    core.app.handle_exception(e)
+    ~~~~~~~~~~~~~~~~~~~~~~~~~^^^
+  File "C:\Users\davec\gitwork\dxfwiz\.venv\Lib\site-packages\nicegui\app\app.py", line 176, in handle_exception
+    if context.slot_stack and context.client is not None:
+                              ^^^^^^^^^^^^^^
+  File "C:\Users\davec\gitwork\dxfwiz\.venv\Lib\site-packages\nicegui\context.py", line 41, in client
+    return self.slot.parent.client
+           ^^^^^^^^^^^^^^^^
+  File "C:\Users\davec\gitwork\dxfwiz\.venv\Lib\site-packages\nicegui\slot.py", line 31, in parent
+    raise RuntimeError('The parent element this slot belongs to has been deleted.')
+RuntimeError: The parent element this slot belongs to has been deleted.
+
+
+I'm getting errors like these when loading intake4. should i worry?
+Found non-unique entity handle #90, data validation is required.
+Found non-unique entity handle #90, data validation is required.
+Found non-unique entity handle #90, data validation is required.
+Found non-unique entity handle #93, data validation is required.
+Found non-unique entity handle #96, data validation is required.
+Found non-unique entity handle #9a, data validation is required.
+Found non-unique entity handle #9e, data validation is required.
+Found non-unique entity handle #9e, data validation is required.
+Found non-unique entity handle #9e, data validation is required.
+Found non-unique entity handle #a5, data validation is required.
+Found non-unique entity handle #a5, data validation is required.
+Found non-unique entity handle #a5, data validation is required.
+Found non-unique entity handle #a5, data validation is required.
+Found non-unique entity handle #ae, data validation is required.
+Found non-unique entity handle #ae, data validation is required.
+Found non-unique entity handle #ae, data validation is required.
+Found non-unique entity handle #ae, data validation is required.
+Found non-unique entity handle #ae, data validation is required.
+Found non-unique entity handle #ae, data validation is required.
+Found non-unique entity handle #ae, data validation is required.
+Found non-unique entity handle #ae, data validation is required.
+Found non-unique entity handle #ae, data validation is required.
+Found non-unique entity handle #ae, data validation is required.
+Found non-unique entity handle #ae, data validation is required.
+Found non-unique entity handle #ae, data validation is required.
+Found non-unique entity handle #ae, data validation is required.
+Found non-unique entity handle #ae, data validation is required.
+Found non-unique entity handle #ae, data validation is required.
+Found non-unique entity handle #ae, data validation is required.
+Found non-unique entity handle #ae, data validation is required.
+Found non-unique entity handle #ae, data validation is required.
+Found non-unique entity handle #b8, data validation is required.
+Found non-unique entity handle #b8, data validation is required.
+Found non-unique entity handle #b8, data validation is required.
+Found non-unique entity handle #b8, data validation is required.
+Found non-unique entity handle #bf, data validation is required.
+Found non-unique entity handle #bf, data validation is required.
+Found non-unique entity handle #bf, data validation is required.
+Found non-unique entity handle #bf, data validation is required.
+Found non-unique entity handle #bf, data validation is required.
+Found non-unique entity handle #bf, data validation is required.
+Found non-unique entity handle #cf, data validation is required.
+Found non-unique entity handle #cf, data validation is required.
+Found non-unique entity handle #cf, data validation is required.
+Found non-unique entity handle #cf, data validation is required.
+Found non-unique entity handle #cf, data validation is required.
+Found non-unique entity handle #cf, data validation is required.
+Found non-unique entity handle #df, data validation is required.
+Found non-unique entity handle #e4, data validation is required.
+Found non-unique entity handle #e9, data validation is required.
+Found non-unique entity handle #ee, data validation is required.
+Found non-unique entity handle #f3, data validation is required.
+Found non-unique entity handle #f8, data validation is required.
+Found non-unique entity handle #fd, data validation is required.
+Found non-unique entity handle #102, data validation is required.
+Found non-unique entity handle #107, data validation is required.
+Found non-unique entity handle #107, data validation is required.
+Found non-unique entity handle #107, data validation is required.
+Found non-unique entity handle #107, data validation is required.
+Found non-unique entity handle #107, data validation is required.
+Found non-unique entity handle #107, data validation is required.
+Found non-unique entity handle #107, data validation is required.
+Found non-unique entity handle #107, data validation is required.
+Found non-unique entity handle #107, data validation is required.
+Found non-unique entity handle #107, data validation is required.
+Found non-unique entity handle #107, data validation is required.
+Found non-unique entity handle #107, data validation is required.
+Found non-unique entity handle #107, data validation is required.
+Found non-unique entity handle #107, data validation is required.
+Found non-unique entity handle #107, data validation is required.
+Found non-unique entity handle #107, data validation is required.
+Found non-unique entity handle #107, data validation is required.
+Found non-unique entity handle #107, data validation is required.
+Found non-unique entity handle #107, data validation is required.
+Found non-unique entity handle #107, data validation is required.
+
+(7) generate plan puts the plan into the tiny sidbar! that's not right!
+We should move to another screen -- the one labelled 'toolpaths'.  
+on this screen we should repeat the geometry on the right, but using only about 2/3 of the screen. on the right, we should have the yaml from the operation plan.  eventually we'll change the display here to show the operations, but for now we're just repeating the geometry.  
+also on this new screen you can stub out the piecres for the next step-- a post processor selection ( right now the only choice is uccnc, but use a drop down box for later).  and an action button that says generate toolpaths. and below that a disabled button for download gcode/bundle. but disabled ( it will get enabled when toolpaths are generated. 

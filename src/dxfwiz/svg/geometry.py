@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from html import escape
 from pathlib import Path
@@ -14,6 +15,7 @@ from dxfwiz.yaml_io import load_yaml_file
 FLATTENING_DISTANCE = 0.005
 MIN_MARKER_RADIUS = 0.035
 MAX_MARKER_RADIUS = 0.095
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -36,6 +38,7 @@ def render_geometry_svg(
     fixed_dxf_path: str | Path,
     svg_path: str | Path,
 ) -> str:
+    logger.info("Rendering geometry SVG %s", svg_path)
     geom = load_yaml_file(geom_yaml_path)
     fixed_doc = ezdxf.readfile(fixed_dxf_path)
     entity_by_handle = {entity.dxf.handle: entity for entity in fixed_doc.modelspace()}
@@ -86,6 +89,14 @@ def render_geometry_svg(
             geometry_elements.append(geometry)
             if annotation:
                 annotation_elements.append(annotation)
+    annotation_elements.append(
+        _render_entity_name_labels(
+            entities=geom["entities"],
+            role_by_entity=role_by_entity,
+            max_y=max_y,
+            marker_radius=marker_radius,
+        )
+    )
 
     svg = _svg_document(
         min_x=min_x,
@@ -98,6 +109,7 @@ def render_geometry_svg(
     svg_path = Path(svg_path)
     svg_path.parent.mkdir(parents=True, exist_ok=True)
     svg_path.write_text(svg, encoding="utf-8")
+    logger.info("Wrote geometry SVG %s", svg_path)
     return svg
 
 
@@ -583,6 +595,39 @@ def _distance_squared(a: tuple[float, float], b: tuple[float, float]) -> float:
     return (a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2
 
 
+def _render_entity_name_labels(
+    entities: list[dict[str, Any]],
+    role_by_entity: dict[str, str],
+    max_y: float,
+    marker_radius: float,
+) -> str:
+    labels = []
+    font_size = marker_radius * 5.2
+    offset = marker_radius * 7.5
+    for index, entity in enumerate(entities):
+        role = role_by_entity.get(entity["id"], "uncontained")
+        if role in {"frame", "ignored"}:
+            continue
+        bounds = entity.get("bounding_box")
+        if bounds is None:
+            continue
+        x1, y1, x2, y2 = _rendered_bounds(bounds, max_y)
+        cx = (x1 + x2) / 2
+        cy = (y1 + y2) / 2
+        angle_slot = index % 4
+        dx = (-offset if angle_slot in {0, 3} else offset)
+        dy = (-offset if angle_slot in {0, 1} else offset)
+        lx = cx + dx
+        ly = cy + dy
+        labels.append(
+            f'<g class="entity-name-label" data-entity-ref="{escape(entity["id"])}">\n'
+            f'  <path class="entity-name-leader" d="M {lx:.6f} {ly:.6f} L {cx:.6f} {cy:.6f}" marker-end="url(#entity-name-arrow)" />\n'
+            f'  <text class="entity-name-text" x="{lx:.6f}" y="{ly:.6f}" font-size="{font_size:.6f}px">{escape(entity["id"])}</text>\n'
+            f"</g>"
+        )
+    return "\n    ".join(labels)
+
+
 def _svg_document(
     min_x: float,
     width: float,
@@ -603,6 +648,9 @@ def _svg_document(
   <defs>
     <marker id="leader-arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto" markerUnits="strokeWidth">
       <path d="M 0 0 L 8 4 L 0 8 z" fill="#475569" />
+    </marker>
+    <marker id="entity-name-arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto" markerUnits="strokeWidth">
+      <path d="M 0 0 L 8 4 L 0 8 z" fill="#16a34a" />
     </marker>
   </defs>
   <style>
@@ -659,6 +707,21 @@ def _svg_document(
       font-family: Segoe UI, Arial, sans-serif;
       font-size: {marker_radius * 3.8:.6f}px;
       fill: #111827;
+    }}
+    .entity-name-text {{
+      font-family: Segoe UI, Arial, sans-serif;
+      font-weight: 800;
+      fill: #16a34a;
+      paint-order: stroke;
+      stroke: #ffffff;
+      stroke-width: 2.5px;
+      vector-effect: non-scaling-stroke;
+    }}
+    .entity-name-leader {{
+      fill: none;
+      stroke: #16a34a;
+      stroke-width: 0.9px;
+      vector-effect: non-scaling-stroke;
     }}
     .legend-swatch {{
       fill: none;

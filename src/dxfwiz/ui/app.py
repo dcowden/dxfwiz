@@ -1,13 +1,20 @@
 from __future__ import annotations
 
+import asyncio
+import json
+import logging
 import os
 import re
+import urllib.request
 from html import escape
 from pathlib import Path
 from typing import Any
 
 from nicegui import app, ui
 
+from dxfwiz.api import router as api_router
+from dxfwiz.logging_config import configure_logging
+from dxfwiz.planning import PlanningRequest, PlanningResponse, load_system_planner_advice
 from dxfwiz.schemas import MachineFile, OperationInputsFile, PlannerFile
 from dxfwiz.ui.service import ProjectArtifacts, ProjectService
 from dxfwiz.yaml_io import load_yaml_file
@@ -23,9 +30,13 @@ service = ProjectService(
     planner_yaml=EXAMPLES_DIR / "planner.yaml",
 )
 app.add_static_files("/workspace", WORKSPACE_DIR)
+app.include_router(api_router)
+logger = logging.getLogger(__name__)
 
 
 def main() -> None:
+    configure_logging()
+    logger.info("Starting DXF Wizard UI")
     machine = service.load_machine()
     state: dict[str, Any] = {"project": None, "chat": None, "crumbs": None, "inputs": {}}
 
@@ -85,6 +96,14 @@ def main() -> None:
           .viewer-host { height: 100%; min-height: 0; }
           .planning-scroll { flex: 1; min-height: 0; overflow: auto; padding: 14px; }
           .planning-footer { border-top: 1px solid #e2e8f0; padding: 12px; background: #ffffff; }
+          .graphics-area { height: 100%; min-height: 0; display: flex; flex-direction: column; gap: 8px; }
+          .graphics-toolbar {
+            flex: 0 0 auto; display: flex; align-items: center; gap: 8px;
+            background: #ffffff; border: 1px solid #dbe3ef; border-radius: 7px; padding: 7px;
+          }
+          .graphics-toolbar .q-btn { min-height: 32px; }
+          .graphics-toolbar .toggle-on { background: #dbeafe; color: #1d4ed8; }
+          .graphics-host { flex: 1; min-height: 0; }
           .summary-grid { display: grid; grid-template-columns: 1fr auto; gap: 8px 14px; font-size: 13px; }
           .summary-key { color: #64748b; }
           .summary-value { color: #0f172a; font-weight: 650; text-align: right; }
@@ -93,20 +112,37 @@ def main() -> None:
             padding: 10px; margin-bottom: 10px;
           }
           .input-card-title { font-weight: 750; color: #0f172a; font-size: 13px; }
+          .input-card-title-row { display: flex; align-items: center; gap: 8px; margin-bottom: 2px; }
           .input-card-source { color: #64748b; font-size: 12px; margin-top: 2px; margin-bottom: 8px; }
           .input-card.missing { border-color: #fca5a5; background: #fff7f7; }
           .input-card.missing .input-card-title { color: #b91c1c; }
+          .input-card.ok { border-color: #86efac; background: #f0fdf4; }
+          .input-status-ok { color: #16a34a; }
+          .input-status-missing { color: #dc2626; }
           .missing-note { color: #b91c1c; font-size: 12px; font-weight: 650; margin-bottom: 8px; }
           .input-card .q-field { font-size: 13px; }
           .field-row { display: grid; grid-template-columns: minmax(0, 1fr) 88px; gap: 8px; }
           .yaml-view {
             background: #0f172a; color: #e2e8f0; border-radius: 7px; padding: 14px;
-            height: calc(100vh - 180px); overflow: auto; white-space: pre; font: 12px Consolas, monospace;
+            min-height: 0; overflow: visible; white-space: pre; font: 12px Consolas, monospace;
+            width: max-content; min-width: 100%;
           }
-          .settings-screen { height: 100%; padding: 18px; overflow: hidden; background: #eef3f8; }
+          .settings-screen { height: 100%; padding: 18px; overflow: auto; background: #eef3f8; }
           .settings-card {
-            height: 100%; background: #ffffff; border: 1px solid #dbe3ef; border-radius: 8px;
+            min-height: 100%; background: #ffffff; border: 1px solid #dbe3ef; border-radius: 8px;
             padding: 16px; display: flex; flex-direction: column; box-shadow: 0 16px 40px rgba(15, 23, 42, 0.08);
+          }
+          .toolpaths-grid {
+            height: 100%; min-height: 0; display: grid; grid-template-columns: minmax(0, 2fr) minmax(360px, 1fr);
+          }
+          .toolpath-panel {
+            min-height: 0; height: 100%; overflow: auto; border-left: 1px solid #dbe3ef;
+            background: #ffffff; padding: 14px;
+          }
+          .op-output {
+            overflow: auto; white-space: pre; font: 12px Consolas, monospace;
+            background: #0f172a; color: #e2e8f0; border-radius: 7px; padding: 10px; margin-top: 10px;
+            max-height: calc(100vh - 245px);
           }
         </style>
         """
@@ -172,7 +208,7 @@ def render_project_state(content, state: dict, machine: MachineFile, artifacts: 
     with content:
         with ui.element("div").classes("main-grid"):
             with ui.element("div").classes("display-card"):
-                ui.html(render_job_display(artifacts)).classes("viewer-host w-full")
+                _render_graphics_area(artifacts)
             with ui.element("div").classes("planning-panel"):
                 ui.label("Planning").classes("px-4 pt-4 text-lg font-semibold text-slate-900")
                 with ui.element("div").classes("planning-scroll"):
@@ -190,11 +226,13 @@ def render_project_state(content, state: dict, machine: MachineFile, artifacts: 
                         "Generate plan",
                         icon="play_arrow",
                     ).props("color=primary unelevated").classes("w-full mt-2")
+                    generate_indicator = ui.icon("cancel").classes("input-status-missing text-xl mt-2")
 
                     generate_state = {"ready": False}
 
                     def update_generate_state() -> None:
                         _capture_input_values(state, input_widgets, intent_input)
+                        _update_input_section_status(input_widgets)
                         missing = [
                             widget["label"]
                             for widget in input_widgets
@@ -203,21 +241,30 @@ def render_project_state(content, state: dict, machine: MachineFile, artifacts: 
                         if missing:
                             generate_state["ready"] = False
                             generate_button.disable()
+                            generate_indicator.name = "cancel"
+                            generate_indicator.classes(replace="input-status-missing text-xl mt-2")
                         else:
                             generate_state["ready"] = True
                             generate_button.enable()
+                            generate_indicator.name = "check_circle"
+                            generate_indicator.classes(replace="input-status-ok text-xl mt-2")
 
-                    def generate_plan() -> None:
+                    async def generate_plan() -> None:
                         if not generate_state["ready"]:
                             return
                         state["inputs"]["planning_notes"] = intent_input.value or ""
-                        note = intent_input.value or ""
-                        suffix = f" Notes captured: {note}" if note else ""
-                        ui.notify(
-                            "Required inputs are present. Operation-plan generation is the next implementation step."
-                            + suffix,
-                            type="positive",
-                        )
+                        request = _planning_request(machine, planner, artifacts, state)
+                        response = await _post_plan_request(request)
+                        state["inputs"]["op_yaml"] = response.op_yaml
+                        if response.errors:
+                            state["inputs"]["op_yaml"] = _issues_yaml(response)
+                            ui.notify("Plan has errors to resolve.", type="negative")
+                        elif response.warnings:
+                            ui.notify("Plan generated with warnings.", type="warning")
+                        else:
+                            ui.notify("Plan generated.", type="positive")
+                        state["plan_response"] = response
+                        render_toolpaths_state(state["content"], state)
 
                     for widget in input_widgets:
                         for control in _iter_controls(widget["control"]):
@@ -237,11 +284,47 @@ def render_settings_state(content, state: dict) -> None:
                 with ui.tabs().classes("w-full mt-2") as tabs:
                     machine_tab = ui.tab("machine.yaml", icon="precision_manufacturing")
                     planner_tab = ui.tab("planner.yaml", icon="rule")
-                with ui.tab_panels(tabs, value=machine_tab).classes("w-full grow min-h-0"):
-                    with ui.tab_panel(machine_tab).classes("h-full min-h-0"):
+                with ui.tab_panels(tabs, value=machine_tab).classes("w-full"):
+                    with ui.tab_panel(machine_tab):
                         ui.html(_yaml_pre(EXAMPLES_DIR / "machine.yaml"))
-                    with ui.tab_panel(planner_tab).classes("h-full min-h-0"):
+                    with ui.tab_panel(planner_tab):
                         ui.html(_yaml_pre(EXAMPLES_DIR / "planner.yaml"))
+
+
+def render_toolpaths_state(content, state: dict) -> None:
+    artifacts = state.get("project")
+    if artifacts is None:
+        return
+    _render_crumbs(state, active="toolpaths")
+    content.clear()
+    with content:
+        with ui.element("div").classes("toolpaths-grid"):
+            with ui.element("div").classes("display-card"):
+                _render_graphics_area(artifacts)
+            with ui.element("div").classes("toolpath-panel"):
+                ui.label("Toolpaths").classes("text-lg font-semibold text-slate-900")
+                ui.select(["uccnc"], value="uccnc", label="Post processor").props("outlined dense").classes("w-full mt-3")
+                ui.button("Generate toolpaths", icon="route").props("color=primary unelevated").classes("w-full mt-3")
+                ui.button("Download gcode / bundle", icon="download").props("disable unelevated").classes("w-full mt-2")
+                ui.label("op.yaml").classes("text-sm font-semibold text-slate-700 mt-4")
+                ui.html(f'<pre class="op-output">{escape(state["inputs"].get("op_yaml", ""))}</pre>')
+
+
+def _render_graphics_area(artifacts: ProjectArtifacts) -> None:
+    with ui.element("div").classes("graphics-area"):
+        with ui.element("div").classes("graphics-toolbar"):
+            ui.button(icon="zoom_in", on_click=lambda: ui.run_javascript("dxfwizZoom(0.82)")).props("flat dense").tooltip("Zoom in")
+            ui.button(icon="zoom_out", on_click=lambda: ui.run_javascript("dxfwizZoom(1.18)")).props("flat dense").tooltip("Zoom out")
+            ui.button(icon="fit_screen", on_click=lambda: ui.run_javascript("dxfwizInitViewer(); dxfwizResetView()")).props("flat dense").tooltip("Zoom to extents")
+            ui.separator().props("vertical")
+            ui.button(icon="rotate_left", on_click=lambda: ui.run_javascript("dxfwizRotate(-90)")).props("flat dense").tooltip("Rotate left")
+            ui.button(icon="rotate_right", on_click=lambda: ui.run_javascript("dxfwizRotate(90)")).props("flat dense").tooltip("Rotate right")
+            ui.separator().props("vertical")
+            label_button = ui.button("Entities", icon="label").props("flat dense").classes("toggle-on")
+            dim_button = ui.button("Dimensions", icon="straighten").props("flat dense").classes("toggle-on")
+            label_button.on("click", lambda: ui.run_javascript("dxfwizToggleLayer('entity-labels')"))
+            dim_button.on("click", lambda: ui.run_javascript("dxfwizToggleLayer('dimension-labels')"))
+        ui.html(render_job_display(artifacts)).classes("graphics-host w-full")
 
 
 def _planning_context(
@@ -337,12 +420,14 @@ def _render_operation_input_cards(context: dict[str, Any], state: dict[str, Any]
     inputs = state["inputs"]
     widgets: list[dict[str, Any]] = []
 
-    stock_missing = not inputs.get("stock_xy") or not inputs.get("stock_material")
-    with ui.element("div").classes("input-card" + (" missing" if stock_missing else "")):
-        ui.label("Stock").classes("input-card-title")
+    stock_missing = not inputs.get("stock_xy") or not inputs.get("stock_material") or not inputs.get("stock_thickness")
+    stock_card = ui.element("div").classes("input-card" + (" missing" if stock_missing else " ok"))
+    with stock_card:
+        stock_icon = _input_status_header("Stock", not stock_missing)
         ui.label(_sources_text(["stock_size", "stock_material", "stock_thickness"], sources)).classes("input-card-source")
-        if stock_missing:
-            ui.label("Missing required stock information.").classes("missing-note")
+        stock_note = ui.label("Missing required stock information.").classes("missing-note")
+        if not stock_missing:
+            stock_note.style("display: none")
         with ui.element("div").classes("field-row"):
             stock_xy = ui.input("XY size", value=inputs.get("stock_xy", "")).props("outlined dense")
             stock_units = ui.select(["in", "mm"], value=inputs.get("stock_units") or geometry["units"]["length"], label="UOM").props("outlined dense")
@@ -358,19 +443,21 @@ def _render_operation_input_cards(context: dict[str, Any], state: dict[str, Any]
         ).props("outlined dense").classes("w-full")
     widgets.extend(
         [
-            {"name": "stock_size", "label": "Stock", "required": True, "control": stock_xy, "state_key": "stock_xy"},
-            {"name": "stock_material", "label": "Stock material", "required": True, "control": stock_material, "state_key": "stock_material"},
-            {"name": "stock_units", "label": "Stock units", "required": False, "control": stock_units, "state_key": "stock_units"},
-            {"name": "stock_thickness", "label": "Stock thickness", "required": False, "control": stock_thickness, "state_key": "stock_thickness"},
+            {"name": "stock_size", "label": "Stock", "required": True, "control": stock_xy, "state_key": "stock_xy", "section": "stock", "card": stock_card, "icon": stock_icon, "note": stock_note},
+            {"name": "stock_material", "label": "Stock material", "required": True, "control": stock_material, "state_key": "stock_material", "section": "stock", "card": stock_card, "icon": stock_icon, "note": stock_note},
+            {"name": "stock_units", "label": "Stock units", "required": False, "control": stock_units, "state_key": "stock_units", "section": "stock", "card": stock_card, "icon": stock_icon, "note": stock_note},
+            {"name": "stock_thickness", "label": "Stock thickness", "required": True, "control": stock_thickness, "state_key": "stock_thickness", "section": "stock", "card": stock_card, "icon": stock_icon, "note": stock_note},
         ]
     )
 
     coordinate_missing = not inputs.get("z_zero_position") or not inputs.get("coordinate_system")
-    with ui.element("div").classes("input-card" + (" missing" if coordinate_missing else "")):
-        ui.label("Coordinate System").classes("input-card-title")
+    coordinate_card = ui.element("div").classes("input-card" + (" missing" if coordinate_missing else " ok"))
+    with coordinate_card:
+        coordinate_icon = _input_status_header("Coordinate System", not coordinate_missing)
         ui.label(_sources_text(["z_zero_position", "coordinate_system"], sources)).classes("input-card-source")
-        if coordinate_missing:
-            ui.label("Missing required coordinate system information.").classes("missing-note")
+        coordinate_note = ui.label("Missing required coordinate system information.").classes("missing-note")
+        if not coordinate_missing:
+            coordinate_note.style("display: none")
         z_zero = ui.select(
             ["stock_top", "spoilboard_top"],
             value=inputs.get("z_zero_position") or None,
@@ -383,13 +470,14 @@ def _render_operation_input_cards(context: dict[str, Any], state: dict[str, Any]
         ).props("outlined dense").classes("w-full")
     widgets.extend(
         [
-            {"name": "z_zero_position", "label": "Z zero", "required": True, "control": z_zero, "state_key": "z_zero_position"},
-            {"name": "coordinate_system", "label": "Coordinate system", "required": True, "control": coordinate_system, "state_key": "coordinate_system"},
+            {"name": "z_zero_position", "label": "Z zero", "required": True, "control": z_zero, "state_key": "z_zero_position", "section": "coordinate", "card": coordinate_card, "icon": coordinate_icon, "note": coordinate_note},
+            {"name": "coordinate_system", "label": "Coordinate system", "required": True, "control": coordinate_system, "state_key": "coordinate_system", "section": "coordinate", "card": coordinate_card, "icon": coordinate_icon, "note": coordinate_note},
         ]
     )
 
-    with ui.element("div").classes("input-card"):
-        ui.label("Tools").classes("input-card-title")
+    tools_card = ui.element("div").classes("input-card ok")
+    with tools_card:
+        tools_icon = _input_status_header("Tools", True)
         ui.label("Planner preference | source: planner.yaml and machine.yaml").classes("input-card-source")
         tool_options = {tool.id: f"{tool.id} - {tool.description}" for tool in machine.tools}
         tool_control = ui.select(
@@ -397,22 +485,31 @@ def _render_operation_input_cards(context: dict[str, Any], state: dict[str, Any]
             value=inputs.get("tools") or planner.defaults.default_tool,
             label="Tool",
         ).props("outlined dense").classes("w-full")
-    widgets.append({"name": "tools", "label": "Tools", "required": False, "control": tool_control, "state_key": "tools"})
+    widgets.append({"name": "tools", "label": "Tools", "required": False, "control": tool_control, "state_key": "tools", "section": "tools", "card": tools_card, "icon": tools_icon, "note": None})
 
     workholding_missing = not inputs.get("workholding_method")
-    with ui.element("div").classes("input-card" + (" missing" if workholding_missing else "")):
-        ui.label("Workholding").classes("input-card-title")
+    workholding_card = ui.element("div").classes("input-card" + (" missing" if workholding_missing else " ok"))
+    with workholding_card:
+        workholding_icon = _input_status_header("Workholding", not workholding_missing)
         ui.label(_sources_text(["workholding_method"], sources)).classes("input-card-source")
-        if workholding_missing:
-            ui.label("Missing required workholding method.").classes("missing-note")
+        workholding_note = ui.label("Missing required workholding method.").classes("missing-note")
+        if not workholding_missing:
+            workholding_note.style("display: none")
         workholding = ui.select(
             list(machine.machine.workholding),
             value=inputs.get("workholding_method") or [],
             label="Workholding",
             multiple=True,
         ).props("outlined dense use-chips").classes("w-full")
-    widgets.append({"name": "workholding_method", "label": "Workholding", "required": True, "control": workholding, "state_key": "workholding_method"})
+    widgets.append({"name": "workholding_method", "label": "Workholding", "required": True, "control": workholding, "state_key": "workholding_method", "section": "workholding", "card": workholding_card, "icon": workholding_icon, "note": workholding_note})
     return widgets
+
+
+def _input_status_header(title: str, ok: bool):
+    with ui.element("div").classes("input-card-title-row"):
+        icon = ui.icon("check_circle" if ok else "cancel").classes("input-status-ok" if ok else "input-status-missing")
+        ui.label(title).classes("input-card-title")
+    return icon
 
 
 def _sources_text(names: list[str], sources: dict[str, str]) -> str:
@@ -459,6 +556,84 @@ def _capture_input_values(state: dict[str, Any], widgets: list[dict[str, Any]], 
         if key:
             inputs[key] = getattr(widget["control"], "value", None)
     inputs["planning_notes"] = notes_control.value or ""
+
+
+def _update_input_section_status(widgets: list[dict[str, Any]]) -> None:
+    sections: dict[str, list[dict[str, Any]]] = {}
+    for widget in widgets:
+        sections.setdefault(widget.get("section", widget["name"]), []).append(widget)
+    for section_widgets in sections.values():
+        required = [widget for widget in section_widgets if widget["required"]]
+        ok = all(_widget_has_value(widget["control"]) for widget in required)
+        card = section_widgets[0].get("card")
+        icon = section_widgets[0].get("icon")
+        note = section_widgets[0].get("note")
+        if card is not None:
+            card.classes(replace="input-card ok" if ok else "input-card missing")
+        if icon is not None:
+            icon.name = "check_circle" if ok else "cancel"
+            icon.classes(replace="input-status-ok" if ok else "input-status-missing")
+        if note is not None:
+            note.style("display: none" if ok else "")
+
+
+def _planning_request(
+    machine: MachineFile,
+    planner: PlannerFile,
+    artifacts: ProjectArtifacts,
+    state: dict[str, Any],
+) -> PlanningRequest:
+    inputs = state["inputs"]
+    return PlanningRequest.model_validate(
+        {
+            "geometry": artifacts.geometry,
+            "machine": machine.model_dump(mode="json"),
+            "system_advice": load_system_planner_advice().model_dump(mode="json"),
+            "user_advice": planner.operation_advice.model_dump(mode="json"),
+            "inputs": {
+                "stock_xy": inputs.get("stock_xy"),
+                "stock_units": inputs.get("stock_units"),
+                "stock_thickness": _float_or_none(inputs.get("stock_thickness")),
+                "stock_material": inputs.get("stock_material"),
+                "z_zero_position": inputs.get("z_zero_position"),
+                "coordinate_system": inputs.get("coordinate_system"),
+                "workholding_method": inputs.get("workholding_method") or [],
+                "tools": inputs.get("tools"),
+                "planning_notes": inputs.get("planning_notes"),
+            },
+        }
+    )
+
+
+def _issues_yaml(response) -> str:
+    from io import StringIO
+
+    from ruamel.yaml import YAML
+
+    data = response.model_dump(mode="json", exclude_none=True)
+    buffer = StringIO()
+    yaml = YAML()
+    yaml.default_flow_style = False
+    yaml.dump(data, buffer)
+    return buffer.getvalue()
+
+
+async def _post_plan_request(request: PlanningRequest) -> PlanningResponse:
+    return await asyncio.to_thread(_post_plan_request_sync, request)
+
+
+def _post_plan_request_sync(request: PlanningRequest) -> PlanningResponse:
+    port = int(os.environ.get("DXFWIZ_PORT", "8080"))
+    body = json.dumps(request.model_dump(mode="json")).encode("utf-8")
+    http_request = urllib.request.Request(
+        f"http://127.0.0.1:{port}/api/plan",
+        data=body,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    with urllib.request.urlopen(http_request, timeout=30) as response:
+        data = json.loads(response.read().decode("utf-8"))
+    return PlanningResponse.model_validate(data)
 
 
 def _stock_size_from_geometry(geometry: dict[str, Any]) -> str | None:
@@ -553,7 +728,14 @@ def _render_crumbs(state: dict, active: str) -> None:
         if not state.get("project"):
             plan_button.disable()
         ui.label(">").classes("step-separator")
-        ui.button("toolpaths", icon="route").props("flat dense disable").classes("nav-muted")
+        toolpaths_class = "nav-active" if active == "toolpaths" else ("nav-link" if state.get("inputs", {}).get("op_yaml") else "nav-muted")
+        toolpaths_button = ui.button(
+            "toolpaths",
+            icon="route",
+            on_click=lambda: render_toolpaths_state(state["content"], state),
+        ).props("flat dense").classes(toolpaths_class)
+        if not state.get("inputs", {}).get("op_yaml"):
+            toolpaths_button.disable()
 
 
 def _return_to_plan(state: dict[str, Any]) -> None:
@@ -571,24 +753,24 @@ async def handle_upload(event: Any, state: dict, machine: MachineFile, content_h
     uploaded_file = event.file
     filename = uploaded_file.name or "uploaded.dxf"
     upload_bytes = await uploaded_file.read()
+    logger.info("Received DXF upload: %s (%d bytes)", filename, len(upload_bytes))
     try:
         artifacts = service.create_project_from_upload(filename, upload_bytes)
     except Exception as exc:  # pragma: no cover - surfaced in UI
+        logger.exception("Failed to process DXF upload: %s", filename)
         ui.notify(f"Failed to process DXF: {exc}", type="negative")
         return
 
     state["project"] = artifacts
-    render_project_state(content_host, state, machine, artifacts)
     ui.notify("geom.yaml generated", type="positive")
+    logger.info("Generated geometry for project %s", artifacts.project_id)
+    render_project_state(content_host, state, machine, artifacts)
 
 
 def render_job_display(artifacts: ProjectArtifacts) -> str:
     svg = _job_scene_svg(artifacts.geometry_svg)
     return f"""
     <div class="dxf-viewer">
-      <div class="viewer-toolbar">
-        <button type="button" title="Zoom to extents" onclick="dxfwizInitViewer(); dxfwizResetView()">{_icon_fit_screen()}</button>
-      </div>
       {svg}
     </div>
     <style>
@@ -821,14 +1003,55 @@ def _viewer_script() -> str:
         svg.setAttribute('viewBox', svg.dataset.currentViewBox);
         svg.focus();
       };
+      window.dxfwizRotate = function(delta) {
+        const svg = document.getElementById('dxfwiz-scene');
+        if (!svg) return;
+        const next = ((Number(svg.dataset.rotation || '0') + delta) % 360 + 360) % 360;
+        svg.dataset.rotation = String(next);
+        const vb = (svg.dataset.currentViewBox || svg.getAttribute('viewBox')).split(' ').map(Number);
+        const cx = vb[0] + vb[2] / 2;
+        const cy = vb[1] + vb[3] / 2;
+        ['geometry-layer', 'annotation-layer'].forEach(id => {
+          const layer = svg.querySelector('#' + id);
+          if (layer) layer.setAttribute('transform', `rotate(${next} ${cx} ${cy})`);
+        });
+        svg.querySelectorAll('.entity-name-text, .diameter-label').forEach(text => {
+          const x = text.getAttribute('x') || '0';
+          const y = text.getAttribute('y') || '0';
+          text.setAttribute('transform', `rotate(${-next} ${x} ${y})`);
+        });
+      };
+      window.dxfwizToggleLayer = function(layerName) {
+        const svg = document.getElementById('dxfwiz-scene');
+        if (!svg) return;
+        const selectors = {
+          'entity-labels': ['.entity-name-label'],
+          'dimension-labels': ['.diameter-label', '.leader-line', '.callout-bubble']
+        }[layerName] || [];
+        const key = 'show' + layerName.replace(/(^|-)([a-z])/g, (_, _dash, ch) => ch.toUpperCase());
+        const visible = svg.dataset[key] !== '0';
+        svg.dataset[key] = visible ? '0' : '1';
+        selectors.forEach(selector => {
+          svg.querySelectorAll(selector).forEach(element => {
+            element.style.display = visible ? 'none' : '';
+          });
+        });
+        if (document.activeElement) {
+          document.activeElement.classList.toggle('toggle-on', !visible);
+        }
+      };
 
       window.dxfwizInitViewer = function() {
         const svg = document.getElementById('dxfwiz-scene');
         if (!svg || svg.dataset.dxfwizReady === '1') return;
         svg.dataset.dxfwizReady = '1';
-        const initial = svg.getAttribute('viewBox');
+        const initial = svg.dataset.initialViewBox || svg.getAttribute('viewBox');
+        svg.setAttribute('viewBox', initial);
         svg.dataset.initialViewBox = initial;
         svg.dataset.currentViewBox = initial;
+        svg.dataset.showEntityLabels = '1';
+        svg.dataset.showDimensionLabels = '1';
+        svg.dataset.rotation = svg.dataset.rotation || '0';
         let dragging = false;
         let last = null;
         function current() { return svg.dataset.currentViewBox.split(' ').map(Number); }

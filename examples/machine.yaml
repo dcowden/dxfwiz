@@ -8,6 +8,7 @@ machine:
   type: router          # router | laser | plasma
   axes: 3
   max_tools: 1          # 1 means no tool changer; >1 means changer capacity
+  clear_z: 0.25
   workholding: [clamps, screws, tape]
   part_holding: [onionskin, tabs]
   work_envelope:
@@ -26,7 +27,8 @@ machine:
 tools:
   - id: t1
     description: "1/8 flat 2-flute endmill"
-    type: flat_endmill
+    end_type: flat
+    flute_spiral: upcut
     diameter: 0.125        #required
     flutes: 2                #required
     speed: 18000            # rpm, required
@@ -36,7 +38,8 @@ tools:
     step_over: .0625  # optional, default to 1/2 diameter
   - id: t2
     description: "1/8 flat 1-flute endmill"
-    type: flat_endmill
+    end_type: flat
+    flute_spiral: upcut
     diameter: 0.125
     flutes: 1
     speed: 18000
@@ -46,7 +49,8 @@ tools:
     step_over: .0625  # optional, default to 1/2 diameter
   - id: t3
     description: "3/16 2-flute compression endmill"
-    type: compression_endmill
+    end_type: flat
+    flute_spiral: compression
     diameter: 0.1875
     flutes: 2
     speed: 18000
@@ -56,7 +60,8 @@ tools:
     step_over: 0.09375
   - id: t4
     description: "3/16 2-flute upcut endmill"
-    type: upcut_endmill
+    end_type: flat
+    flute_spiral: upcut
     diameter: 0.1875
     flutes: 2
     speed: 18000
@@ -66,7 +71,8 @@ tools:
     step_over: 0.09375
   - id: t5
     description: "1/4 2-flute upcut endmill"
-    type: upcut_endmill
+    end_type: flat
+    flute_spiral: upcut
     diameter: 0.25
     flutes: 2
     speed: 18000
@@ -76,7 +82,8 @@ tools:
     step_over: 0.125
   - id: t6
     description: "1/4 1-flute upcut endmill"
-    type: upcut_endmill
+    end_type: flat
+    flute_spiral: upcut
     diameter: 0.25
     flutes: 1
     speed: 18000
