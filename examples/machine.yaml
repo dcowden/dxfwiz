@@ -11,8 +11,8 @@ machine:
   workholding: [clamps, screws, tape]
   part_holding: [onionskin, tabs]
   work_envelope:
-    x: { min: 0, max: 29.5 }    # placeholder — user to fill in
-    y: { min: 0, max: 19.7 }
+    x: { min: 0, max: 96 }
+    y: { min: 0, max: 50 }
     z: { min: -3.15, max: 0 }
   coordinate_system:
     x_positive: right

@@ -64,13 +64,12 @@ def ensure_case_outputs(case: DxfCase) -> None:
     case.output_dir.mkdir(parents=True, exist_ok=True)
     if not case.fixed_path.exists():
         clean_dxf(case.source_path, case.fixed_path, _clean_config())
-    if not case.geom_path.exists():
-        write_geometry_yaml(
-            case.fixed_path,
-            case.geom_path,
-            original_file=case.source_path.name,
-            cleaned_file=case.fixed_path.name,
-        )
+    write_geometry_yaml(
+        case.fixed_path,
+        case.geom_path,
+        original_file=case.source_path.name,
+        cleaned_file=case.fixed_path.name,
+    )
 
 
 @pytest.mark.parametrize("case", real_dxf_cases(), ids=lambda case: case.name)
@@ -100,6 +99,7 @@ def test_real_dxf_cleaning_outputs_fixed_dxf_and_geom_yaml(case):
     assert fixed_count > 0
     assert fixed_count == result.closed_loops + result.open_paths
     assert geom_data["summary"]["entity_count"] == fixed_count
+    assert geom_data["summary"]["ignored_count"] >= 0
     assert geom_data["units"]["length"] == "in"
 
 
@@ -162,8 +162,9 @@ def test_2xintakev3_geometry_matches_screenshot_expectations():
         "polyline_with_arcs": 8,
         "rectangle": 1,
     }
+    assert data["summary"]["ignored_count"] == 0
 
-    roots = data["containment_tree"]
+    roots = data["entity_map"]
     assert len(roots) == 1
     frame = roots[0]
     assert frame["role"] == "frame"
@@ -199,8 +200,9 @@ def test_intake_front_geometry_matches_screenshot_expectations():
         "circle": 12,
         "polyline_with_arcs": 31,
     }
+    assert data["summary"]["ignored_count"] == 0
 
-    roots = data["containment_tree"]
+    roots = data["entity_map"]
     assert len(roots) == 1
     part = roots[0]
     assert part["role"] == "part"
@@ -220,11 +222,15 @@ def test_intakev4_geometry_matches_screenshot_expectations():
     assert data["units"]["length"] == "in"
     assert data["units"]["source"] == "guessed"
 
-    frames = [node for node in data["containment_tree"] if node["role"] == "frame"]
+    frames = [node for node in data["entity_map"] if node["role"] == "frame"]
+    ignored = [node for node in data["entity_map"] if node["role"] == "ignored"]
     rectangles = [entity for entity in data["entities"] if entity["shape"] == "rectangle"]
 
     assert len(rectangles) == 5
     assert len(frames) == 1
+    assert data["summary"]["ignored_count"] == 4
+    assert len(ignored) == 4
+    assert all(entities[node["entity"]]["shape"] == "rectangle" for node in ignored)
 
     parts = frames[0]["children"]
     assert len(parts) == 9
@@ -266,7 +272,7 @@ def test_intakev4_largest_part_has_17_circular_holes():
     entities = {entity["id"]: entity for entity in data["entities"]}
     populated_frame = next(
         frame
-        for frame in data["containment_tree"]
+        for frame in data["entity_map"]
         if frame["role"] == "frame"
     )
     largest_part = max(

@@ -23,6 +23,7 @@ class Summary(StrictModel):
     entity_count: int = Field(ge=0)
     closed_count: int = Field(ge=0)
     open_count: int = Field(ge=0)
+    ignored_count: int = Field(default=0, ge=0)
     bounding_box: Bounds2D
 
 
@@ -53,6 +54,7 @@ class ContainmentNode(StrictModel):
         "outer_boundary",
         "hole_candidate",
         "uncontained",
+        "ignored",
     ]
     children: list["ContainmentNode"] = Field(default_factory=list)
 
@@ -62,5 +64,5 @@ class GeometryFile(StrictModel):
     units: GeometryUnits
     source: SourceFiles
     summary: Summary
+    entity_map: list[ContainmentNode]
     entities: list[GeometryEntity]
-    containment_tree: list[ContainmentNode]

@@ -39,7 +39,8 @@ def render_geometry_svg(
     geom = load_yaml_file(geom_yaml_path)
     fixed_doc = ezdxf.readfile(fixed_dxf_path)
     entity_by_handle = {entity.dxf.handle: entity for entity in fixed_doc.modelspace()}
-    role_by_entity = _role_map(geom["containment_tree"])
+    entity_map = _entity_map(geom)
+    role_by_entity = _role_map(entity_map)
     circle_labels = _circle_label_map(geom, role_by_entity)
     scale = geom["units"].get("coordinate_scale", 1.0)
     bounds = geom["summary"]["bounding_box"]
@@ -215,16 +216,16 @@ def _render_polyline_markers(
     markers = []
     for index, (x, y, bulge) in enumerate(vertices):
         if not closed and index == 0:
-            markers.append(_triangle_marker(x, y, marker_radius * 1.9, "entity-start-marker"))
+            markers.append(_triangle_marker(x, y, marker_radius * 2.45, "entity-start-marker"))
         elif not closed and index == len(vertices) - 1:
-            markers.append(_square_marker(x, y, marker_radius * 1.55, "entity-end-marker"))
+            markers.append(_square_marker(x, y, marker_radius * 1.85, "entity-end-marker"))
         else:
             markers.append(
                 f'<circle class="segment-marker segment-junction-marker" cx="{x:.6f}" cy="{y:.6f}" r="{marker_radius:.6f}" />'
             )
     if closed:
         x, y, _bulge = vertices[0]
-        markers.append(_triangle_marker(x, y, marker_radius * 1.9, "entity-start-marker"))
+        markers.append(_triangle_marker(x, y, marker_radius * 2.45, "entity-start-marker"))
     return "\n    ".join(markers)
 
 
@@ -306,6 +307,10 @@ def _role_map(nodes: list[dict[str, Any]]) -> dict[str, str]:
     return roles
 
 
+def _entity_map(geom: dict[str, Any]) -> list[dict[str, Any]]:
+    return geom.get("entity_map", geom.get("containment_tree", []))
+
+
 def _circle_label_map(
     geom: dict[str, Any],
     role_by_entity: dict[str, str],
@@ -313,7 +318,7 @@ def _circle_label_map(
     entities = {entity["id"]: entity for entity in geom["entities"]}
     labels: dict[str, CircleLabel] = {}
 
-    for part in _part_nodes(geom["containment_tree"]):
+    for part in _part_nodes(_entity_map(geom)):
         part_entity = entities.get(part["entity"])
         if part_entity is None:
             continue
@@ -615,12 +620,17 @@ def _svg_document(
     .role-cutout.shape-circle .entity-outline {{ stroke-width: 1.15px; }}
     .role-island .entity-outline {{ stroke: #15803d; stroke-width: 1.8px; }}
     .role-uncontained .entity-outline {{ stroke: #7c3aed; stroke-width: 1.6px; stroke-dasharray: 5 4; }}
+    .role-ignored .entity-outline {{ stroke: #94a3b8; stroke-width: 1.2px; stroke-dasharray: 6 4; opacity: 0.45; }}
     .role-part.shape-polyline_with_arcs .entity-outline {{ stroke: #111827; }}
     .segment-marker {{
       fill: #f59e0b;
       stroke: #ffffff;
       stroke-width: 1.2px;
       vector-effect: non-scaling-stroke;
+    }}
+    .entity-start-marker,
+    .entity-end-marker {{
+      fill: #7c3aed;
     }}
     .center-marker {{
       fill: #f59e0b;
@@ -671,7 +681,7 @@ def _svg_document(
     <text class="legend-label" x="{legend_text_x:.6f}" y="{legend_y + marker_radius * 9:.6f}">frame</text>
     <circle class="segment-marker" cx="{legend_x + marker_radius:.6f}" cy="{legend_y + marker_radius * 12:.6f}" r="{marker_radius:.6f}" />
     <text class="legend-label" x="{legend_text_x:.6f}" y="{legend_y + marker_radius * 13:.6f}">junction</text>
-    {_triangle_marker(legend_x + marker_radius, legend_y + marker_radius * 16, marker_radius * 1.9, "entity-start-marker")}
+    {_triangle_marker(legend_x + marker_radius, legend_y + marker_radius * 16, marker_radius * 2.45, "entity-start-marker")}
     <text class="legend-label" x="{legend_text_x:.6f}" y="{legend_y + marker_radius * 17:.6f}">entity start</text>
     {_square_marker(legend_x + marker_radius, legend_y + marker_radius * 20, marker_radius * 1.55, "entity-end-marker")}
     <text class="legend-label" x="{legend_text_x:.6f}" y="{legend_y + marker_radius * 21:.6f}">entity end</text>

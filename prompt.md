@@ -1,151 +1,407 @@
 # dxfwiz
 
-This project makes it very fast to cut part on a cnc router from a 2d dxf or svg file.
+dxfwiz is a browser-based workflow for turning messy 2D DXF/SVG files into CNC-router-ready job bundles. The core idea is that every step produces open, human-readable YAML so humans, scripts, and AI agents can inspect and edit the workflow without being locked into one GUI.
 
-The key differentiator is the use of structured, plain text yaml files for each step, so that agents can easily help out.
+The initial target is 2.5D CNC routers, especially FRC-style workflows where the CAD student, CAM planner, and machine operator may be different people. The current focus is DXF cleanup, geometry recognition, visualization, and preparation for AI-assisted operation planning.
 
-## overall flow
-As a one time set up step, the user creates several yaml files that detail his machine, tools, and cnc post processor.
+## Current Flow
 
-To process a job, the user starts with a 2d vector file ( dxf, svg). The software will perform these steps:
-   1. Clean the file, and produce a yaml file describing the geometry that was recongized
-   2. as the operator for intent, indicating what operations should be performed. The user is presented with a preview
-   3. create a job.yaml file, presenting the operations that hsould be performed. this is done by using the provided intent, and machine files
-   4. generate gcode for the user's machine, using provided post processor details.
-   5. transmit the file to a cloud service so it can be pulled to the machine ( We shoudl assume that the person doing steps 1-3 is NOT the same as the machine operator)
+1. User uploads a DXF.
+2. The system creates a project id and a project workspace folder.
+3. The DXF is cleaned/fixed.
+4. `geom.yaml` is generated from the fixed DXF.
+5. A diagnostic SVG is generated from `geom.yaml` and the fixed DXF.
+6. The UI displays the fixed geometry on top of the machine work area.
+7. Later steps will collect machining intent, generate an operation plan, preview toolpaths, generate gcode, and bundle everything.
 
-The key element of the design of this software, differentiating it from others, is that open source yaml files are created at each step, allowing different tools to be used.  The most important of these files is the operation/job file, which conveys the jobs to be perfomed.  The fact that this file is open format means agents can easily generate it.  
+For now, the NiceGUI app stops after generating `geom.yaml`.
 
-## file specifics
-yaml files contain the information needed to move from raw 2.5 d graphic vector file ( dxf, svg ) to gcode that can be executed on a cnc router. those files are:
+## YAML Files
 
-    1. machine.yaml.  machine config. includes machine dimensions, coorindate system, tool library, fixturing methods, this stuff is the physical 
-    etc
-    2. cnc_post.yaml. cnc machine dialect, ( in my case, uccnc). configures how gcode will be generated
+### `machine.yaml`
 
-    3. planner.yaml. planner guidance file for jobs. this contains defaults and English operation advice used to create new operation plans, so that we can reduce what's needed in each job file
+Physical machine configuration only.
 
-    4. geom.yaml. a file produced from reading a vector file, and reducing it to recognized entities.  One software stage is responsible for reading the raw dxf/svg, and then creating this.  This file has summary imformation ( number of entities, bounding box, etc). Most importantly, we have a tree of entities, oranized with outer entities at the top, and child entities nested undereath their enclosing loops. each entity can be closed or open.  we also have properties for regognized shapes ( hole, line)
+Includes:
 
-    4. job.yaml. a file that contains the details for a job we will run. this includes the operations we will perform, using all the typical 2.5 d operations: drill, helical drill, pocket, contour.  typical options include climb/conventional mill direction, stock origin, leave/finishing distance, stock thickness, and all the usual options.
+- file-level units: length and speed
+- machine name/type/axes
+- work envelope
+- coordinate system
+- spindle details
+- `max_tools`, where `1` means no tool changer and values greater than `1` mean a tool changer with that capacity
+- allowed material workholding methods: `clamps`, `screws`, `tape`, `vacuum`
+- allowed part-holding methods: `onionskin`, `z_rollers`, `z_presser`, `tabs`
+- tool library
 
-## Key project considerations
-1. The power of this project is the open yaml files. The intent is to build an ecosystem that disrupts the market. Its important that these strike the right balance of fleexibilty and simplicty.  We're generally targeting 2.5 d routers and lasers, NOT 5 axis machines. 
+Tool feeds and speeds live on tools as defaults and are not material-specific. Operations can override them later.
 
-2. Design for multi-user flows. One common caes, of course will be one user perofrming all steps.  But the flow I'm going to use first is FRC teams. In this case, the machine operator is separate from the people generating the job files.  The flow in that case is liek this:
-    2a. Machine operator creates tool, post processor, and machine files, and provides them in a shared location of some sort
-    2b. a student begins with a cad pacakge or dxf, and uses the software to create a job file and geometry file, along with a cleaned vedtor file. These files are stored in a shared location, and zipped are called a 'bundle'
-    2c. the operator has the post processor, and generates gcode from the bundle, which can be executed
+Current local machine:
 
-    It is possible that the student might also generate the gcode as well. 
+- units: inches and inches/minute
+- 3-axis vertically oriented ER11 CNC router
+- work envelope: X 0..96 in, Y 0..50 in, Z -3.15..0
+- X positive right, Y positive up
+- origin bottom-left
+- typical tools: 1/8 flat 2-flute, 1/8 flat 1-flute, 3/16 compression, 3/16 upcut, 1/4 upcut 2-flute, 1/4 upcut 1-flute
 
-3. my initial case is frc students beginning with solidworks or onshape.  one very likely total solution is an onshape app, which hosts various machines and their associated files.  Students can skip the step of saving a dxf and possibly some of the step to provide intent, if they have a 3d file. 
+### `post.yaml`
 
-4. no matter what, all users what a confirmation of what will happen. this will typically inculde a simulation/preview. This should be possible from the operation file, and should not require gcode.  Users of plugins ( like solidworks/onshape) might be able to get his in the cad software itself, but we will likely ahve to build one ourselves too
+Post-processor/dialect configuration. Initial target is UCCNC.
 
-5. this tool must be browser based, with nothing to install locally. files should also be shared that way. I'll probably be hosting on render.com
+This should eventually include all dialect details needed to emit valid gcode. Fusion 360 UCCNC post processors are useful references.
 
-6. yaml files provide flexible points and unlock agents!
+### `planner.yaml`
 
-7. even though i am targeting a huge discruption, for now i want to start small and solve my particular problem, which is below
+Planner guidance file. This replaces the earlier `job_template.yaml` name.
 
-## My current broken flow [ reference ]
-I'm doing this work today, and it illustrates the pain. my steps are:
+Contains operator/planner preferences that are not physical machine facts:
 
-1. take a dxf from a student. this is a shitty solidworks export that has tiny line segments that dont touch each other and many other problems requiring it to be cleened.
-2. import into lightburn.  
-3. auto-join. this fixes lots of the issue
-4. create loops/groups as needed
-5. export a dxf that doesnt suck
-6. import that dxf into estlcam.
-7. use estlcam to generate gcode.  Estlcam has several things that work well:
-   7a. UCCNC post
-   7b. settings that allow auto mapping holes in a given range as drills, and in another range as helical drills
-   7c. recognizes controus automatically as holes or bosses, based on their order from the outside. a 'is there an outer frame' option allows providing an outer frame that's the stock size, which is nice. 
-   7d. an 'has outer frame' option ignores that outer frame for purposes of identifying bosses vs holes
-8. save gcode.
-9. open gcode on uccnc and run the program
+- defaults such as stock thickness, z-zero preference, coordinate system, and planner-level `max_tools`
+- English `operation_advice` blocks:
+  - `workholding`
+  - `tools`
+  - `geometry`
 
-## The workflow i want
-After creating machine configs and such, i want to reduce the broken flow to these steps:
+Do not use structured `auto_rules`; put guidance in English advice. Example geometry advice:
 
-   * [one time] create machine, post, and tool config files. take dxf/svg from student
+- for holes between 0.04 in and 0.2 in, prefer drill operations
+- for holes between 0.2 in and 0.6 in, prefer helical drill operations
+- if a strict rectangular frame encloses the parts, treat it as stock/frame
 
-Then, for each job
+Planner `max_tools` means the number of tools the user is willing to use for the job. This differs from machine `max_tools`: if the machine has `max_tools: 1` but planner says `max_tools: 2`, the user is willing to tolerate one manual tool change.
 
-   1. load dxf|svg file. this fixes the vector file, generates geom.yaml, and presents an interface to user showing the entities found, machine boundaries from amchine.yaml.  Very importantly, each loop/entity is labeled with an id, and possibly other things like circle/closed/open, etc.
-   2. prompt user via regular text chat to describe their machining intent in english, like "this is a bearing pillow block. put the origin at the bottom left, machine the center with a parallel stepover pocket, and a full depth finishing pass., etc
-   3. click generate plan. this should show a preview of what will happen, plus generate the job.yaml. the user should be able to manually edit this yaml ( this is a key benefit. I HATE it when you have to re-click everything just to provide a few small changes)
-   4. save bundle. this is a zip file containing the cleaned vector file, the geom.yaml, and the job.yaml.  This is what the machine operator will use to generate gcode.
+### `operation_inputs.yaml`
 
-   Steps 2-6 in my broken curent flow happen in 1 step in this new workflow. gathering all intent is just one more step
+Defines fixed required inputs that must be known before generating an operation plan. This list is not user-modifiable in ordinary planner files.
 
-## software tools/libarires
+Required inputs:
 
-* this is a professional project-- so we need unit test coverage and modular components
-* python 3.x, pytest
-* AI for intent: litellm, instructor
-* cloud provider: render.com
-* python project: packaged as editable package, using pyproject.toml
-* project build tool: uv
-* libraries for geometry processing: shapely, ezdxf, pyclipper,numpy, scipy
-* for web: nicegui, fastapi, 
-* for file editing: jsonschmea, ruamel
-* ai: prefer gemini but support others
-* building gcode: pygcode maybe
-* buidl a nicegui app-- i want a python code base with minial other libraries
-* very important to unit test the code representing the geometry, and the code doing processing
-* ai's role shoud be limited in assisting humans assigning INTENT, which means the step going from a geometry yaml file to an operation file. 
+- stock size
+- stock material
+- workholding method
+- z-zero position
+- coordinate system, such as G54 or G55
 
-* use existing uccnc post processors for inspriation: there's a fusion 360 UCCNC post, which can be ported from javascrpit
+The planner should use machine config, planner config, and geometry to answer as many as possible. If anything remains unknown, ask the user before generating the plan.
 
-## software architecture
-this code will get complex, so the module organizatin is important. create separate modeules with both unit tests and integration tests as follows:
+### `geom.yaml`
 
-* cleaning dxfs. this should use ezdxf. unit tests should include simple cases for gap tolerances, loop formation, and duplicate detection. integration tests should be intentionally messy dxfs with known right answers
+Generated from the fixed vector file. This is meant to be easy for a human to fact-check.
 
-* organizing loops. this should use shapely. unit and integration tests should include loops and non loops, nested loops up 5o 4 deep.
+Top-level order:
 
-* reading/writing each yml file. each file should have a pydantic object for it. unit tests should validate several actual yml files. 
+1. `schema_version`
+2. `units`
+3. `source`
+4. `summary`
+5. `entity_map`
+6. `entities`
 
-* a post processor defintion and associated yml file
+`summary` includes entity count, closed/open count, ignored entity count, and bounding box.
 
-* gcode generator reading a cnc post defintion and an operation plan.
+`entity_map` is the human-readable containment/role map. It appears before full entity definitions. Use compact map syntax for leaf nodes and omit `children` when there are no children:
 
-* service objects for each workflow step: input dxf -> clean -> organzie -> geometry.yml for examples
+```yaml
+entity_map:
+- entity: e9
+  role: frame
+  children:
+  - entity: e1
+    role: part
+    children:
+    - {entity: e10, role: cutout}
+    - {entity: e11, role: cutout}
+- {entity: e30, role: uncontained}
+```
 
-* services for creating operation plans  from geometry, machine configs, and human input, by passing human english into an ai prompt
+`entities` contains the full details for each entity:
 
-* service for displkaying a simulation of an operation plan\
-* fast api points for each of the service above
+- stable `id`
+- type: `closed_loop` or `open_path`
+- shape: `circle`, `rectangle`, `polyline`, `polyline_with_arcs`, etc.
+- `source_refs` linking back to fixed DXF handles or dxfwiz ids
+- bounding box
+- center/diameter for circles
+- area/perimeter where available
 
-* a gui using nicegui
+Entity IDs in `geom.yaml` must trace back to fixed DXF entities. The fixed DXF is considered the geometry source of record for linking.
 
-## file architecture
-tests should go in a tests/folder. data for tests goes in tests/data.  pyproject.toml in root. project source in a package, development done as editable package.
+Open paths are eligible for future operations. The operation name for following an open entity is `trace`.
 
-## inital scope
-initially i only care about uccnc, 2.5d routers, and the workflow described above.  I want to get a working prototype running as quickly as possible.  Though we are desiging for tsudents and multi-uesr flow, i'll be running it all myself locally for now, so we do not care about we scalabilty and deployment
+### `job.yaml` / Future Operation Plan
 
-# sprint 1-- generate base project skeleton, and generate example yaml files for review
+The eventual operation file contains machining operations such as:
 
-# clarifications:
-answers: question 1: operator intent. the input should be plan text from the user, plus a text editor to allow th euser to directly edit the yaml files.  budnles: yes, include the original file as _original.  and the fixed one as _fixed.  ai is in scope for hte first scope, but not the first sprint, which is focused on yaml files.   yaml files: machine.yaml should be only machine physical things: work envelope, coorindates, tools.  the planner contains things that are decisions the operator makes, but are NOT physical. examples would be default tool, default milling type ( climb/confentional), default stock thickness, default coordinate system ( g55), and English operation advice. for geom.yaml yes the tree is by containment. loops containing the same objec,t they should be siblings, yes.  for posts, yes this should include all the usual dialect differences necessary. you can find out what's typically required by looking on fusion360 posts, which are javascript typically.  the one for UCCNC is a good start
+- drill
+- helical drill
+- pocket
+- contour
+- trace
 
-# my machine details
-er11 spinele
-vertically oriented, 3 axis mill
-typical tools: 1/8 flat 2 flute end mill, 1/8" 1 flute end mill, 3/16 2 flute compression endmull, 3/16 2 flute upcut endmill, 1/4" 2 flute upcut, 1/4" 1 flute upcut
-x axis is towards the right, y is up, z is toward operator. origin in bottom left
+The order of operations should be the order in the file.
 
-# sprint 1 schema review feedback
-1. units: each yaml file that has units should specify preferred units for length and speed at the file level. I use inches and inches/minute.
-2. tools: should have default speed (rpm) and feedrate (ipm or mm/s), plus plunge rate and depth_per_pass. these are the defaults unless overridden in the operation. flute_length and total_length should be optional-- they rarely matter for 2.5d.
-3. coordinate system: do not specify z direction -- derive it from x and y. use 'right', 'left', 'up', 'down' (not 'away from operator'). my machine: x=right, y=up.
-4. work envelope: remove units from work_envelope since units are set at the file level.
-5. spindle max_rpm belongs in machine.yaml, NOT in cnc_post.yaml. 
-6. cnc_post.yaml also needs file-level units.
-7. planner.yaml: remove the entire operation_defaults section. move feed_rate, plunge_rate, and depth_per_pass onto tools in machine.yaml instead.  Keep defaults and English operation_advice sections; do not use structured auto_rules.
-8. geom.yaml entity-to-dxf linking: entity IDs in geom.yaml must be traceable back to entities in the cleaned dxf. approach TBD.
-9. geom.yaml frame detection should be strict. A frame is only a rectangular closed loop with exactly four straight sides, usually representing stock size. If multiple frames are present and only one contains profiles, recognize only the populated rectangle as the frame in the containment tree and ignore the empty stock rectangles for semantic part nesting. If all top-level closed loops are rectangles and none contains profiles, treat them as parts, not frames.
-10. geom.yaml unit handling: if the DXF declares units, use those units. If the DXF is unitless, guess only between inches and millimeters using documented evidence: router-scale plausibility, minimum feature size, common circular hole sizes, common stock/frame sizes, and weak DXF metric/imperial hints such as $MEASUREMENT. geom.yaml should include the selected length unit, whether it was explicit or guessed, confidence, and evidence for the decision.
+Typical operation options include:
+
+- tool
+- depth, where depth means negative Z into material
+- climb/conventional direction
+- stock allowance / finish pass
+- ramp options
+- tabs/onion skin/etc.
+- feeds and speeds overrides
+
+## DXF Cleaning
+
+DXF cleanup is a known hard problem. The current implementation uses `ezdxf` and focuses on:
+
+- reading LINE, ARC, CIRCLE, LWPOLYLINE, and old POLYLINE entities
+- snapping endpoints by tolerance
+- removing zero-length entities
+- removing duplicate/redundant segments
+- chaining segments into open or closed paths
+- preserving circles and arcs where possible
+- writing fixed DXFs that SolidWorks and LightBurn can open
+
+Generated fixed DXFs should not change units from the source/fixed coordinate space. If unit guessing later determines the design is inch-sized despite mm-looking coordinates, `geom.yaml` can scale reported coordinates using `coordinate_scale`, but the fixed DXF should remain in its original coordinate values.
+
+## Geometry Recognition
+
+Use Shapely for containment/nesting.
+
+Roles:
+
+- `frame`
+- `part`
+- `cutout`
+- `island`
+- `outer_boundary`
+- `hole_candidate`
+- `uncontained`
+- `ignored`
+
+Frame detection is strict:
+
+- A frame is only a rectangular closed loop with four straight sides.
+- Frames usually represent stock size.
+- If multiple frames exist and only one contains profiles, recognize only the populated rectangle as the frame.
+- Empty top-level rectangular stock frames should be marked with role `ignored` when a populated frame also exists.
+- Ignored entities remain listed in `geom.yaml` and count toward `summary.ignored_count`.
+- If all top-level closed loops are rectangles and none contains profiles, treat them as parts, not frames.
+
+Containment meaning:
+
+- A frame contains parts.
+- Parts contain cutouts.
+- Cutouts may contain islands.
+- Current real test files do not contain islands.
+
+## Unit Detection
+
+If the DXF contains trustworthy explicit units, use those units. If not, guess only between inches and millimeters.
+
+Heuristics:
+
+- router-scale plausibility
+- no practical CNC-router feature should be smaller than about 0.01 in
+- no practical part/job should be larger than about 9 ft for this use case
+- common circular hole sizes
+- common fractional inch sizes
+- common metric hole sizes
+- common stock/frame sizes
+- weak DXF hints such as `$MEASUREMENT`
+
+Some DXFs may declare or imply mm even when the design is actually inch-sized. `geom.yaml` should record:
+
+- selected length unit
+- source: `explicit_dxf` or `guessed`
+- confidence
+- coordinate scale
+- evidence list
+
+The three current real test DXFs should resolve to inches.
+
+## SVG Diagnostics
+
+The diagnostic SVG is part of the bundle and should be useful without JavaScript.
+
+It should include layers:
+
+- geometry layer
+- annotation layer
+- legend layer
+
+Geometry display:
+
+- part outlines are bold/dark
+- cutouts/holes are lighter
+- frame is green in the UI and diagnostic SVG
+- ignored entities are hidden in the planner view, but may be shown faintly in diagnostic SVGs
+- segment/node markers show where entities are split
+- entity start/end markers are purple
+- hover titles show entity id, DXF handle, type, shape, vertex count, arc count, etc.
+
+Circle labels:
+
+- repeated holes of the same diameter are grouped per part
+- labels use drafting-style callouts outside the frame
+- callout bubbles may be placed on either left or right side
+- leaders have thin strokes and arrows
+- leaders point to the nearest point on the referenced circle, not the center
+- labels use the diameter symbol, e.g. `⌀ 0.201 in`, with count on a second line such as `12 places`
+
+The SVG should be generated from `geom.yaml` and the fixed DXF.
+
+## NiceGUI UI
+
+The UI is a NiceGUI web app launched by:
+
+```cmd
+run.cmd
+```
+
+For now it uses `examples/machine.yaml` and `examples/planner.yaml`, but it should be designed so users can later maintain their own machine/planner files.
+
+Current UI behavior:
+
+- Initial state shows a centered "Choose a DXF" upload call to action.
+- Do not show the machine SVG or chat until geometry is generated.
+- Uploading a DXF creates a project id and stores artifacts under `workspace/<project_id>/`.
+- After geometry generation, show:
+  - the machine work area
+  - generated geometry SVG as a layer
+  - a chat panel stub
+- The menu/wizard bar moves left to right:
+  - choose dxf
+  - uploaded file / geom.yaml
+  - operation plan
+  - toolpaths
+- Prior wizard steps should be clickable where practical.
+- Settings belong on the far right.
+
+Viewer behavior:
+
+- Mouse wheel zooms only after the user clicks/focuses the SVG viewer.
+- Left click and drag pans.
+- Zoom buttons use icons, not text.
+- Include zoom in, zoom out, and zoom extents.
+- Show machine origin coordinate axes:
+  - +X red arrow
+  - +Y green arrow
+
+Chat behavior:
+
+- Chat is hidden until geometry exists.
+- Chat input should be obvious and fixed at the bottom of the chat panel.
+- The large empty area should be the log, not a mysterious input area.
+- Chat planning behavior is stubbed for now.
+
+## Service Architecture
+
+Use service objects for workflow steps. The current UI has a `ProjectService` that:
+
+- creates a unique project id
+- creates `workspace/<project_id>/`
+- stores the uploaded original DXF
+- writes fixed DXF
+- writes `geom.yaml`
+- writes diagnostic SVG
+
+This local filesystem implementation is temporary. Design the boundary so later deployments can use:
+
+- FastAPI endpoints
+- background workers such as Celery or arq
+- Redis/database state
+- temporary server storage or object storage
+
+## Bundle Contents
+
+A bundle should include everything required to continue the job elsewhere:
+
+- original DXF/SVG
+- fixed DXF/SVG
+- `geom.yaml`
+- machine/planner/post files used or references to them
+- future `op.yaml` / operation plan
+- future generated gcode
+
+## Toolpath Strategy
+
+Do not casually hand-roll all toolpath generation. Pocketing, ramps, finishing passes, rest machining, tool diameter compensation, and efficient roughing are hard.
+
+Current direction:
+
+- Use SVG for display/diagnostics.
+- Use Shapely and pyclipper/Clipper-style algorithms where appropriate.
+- Use Kiri:Moto as a reference for toolpath behavior, especially pocketing and ramping.
+- Be careful with licenses. GPL code used only behind a web app generally does not trigger distribution the way AGPL does, but this must be considered carefully if code is reused or ported.
+
+## Testing
+
+This is a professional project. Keep tests first-class.
+
+Use:
+
+- Python 3.13+
+- pytest
+- pyproject.toml
+- editable package install
+
+Test layout:
+
+- source under `src/dxfwiz`
+- tests under `tests`
+- real DXF fixtures under `tests/dxf_clean/<case>/`
+- each fixture case has its own `machine.yaml`
+- generated integration outputs under `tests/output/<case>/`
+- `tests/output/` is ignored by git
+
+Current real fixture cases:
+
+- `2xintake`
+- `intakev4`
+- `intake_frontv2`
+
+Integration tests should:
+
+- clean real DXFs
+- write fixed DXFs
+- write `geom.yaml`
+- write SVG diagnostics
+- validate geometry/entity counts against screenshot-derived expectations
+- validate unit detection
+- validate frame/part/cutout nesting
+- validate UI service project artifact generation
+
+Run tests with:
+
+```cmd
+run_tests.cmd
+```
+
+## Current Implementation Notes
+
+Implemented so far:
+
+- project skeleton with `pyproject.toml`
+- schemas for machine, post, planner, operation inputs, job, geom
+- DXF cleaner
+- geometry extraction and containment mapping
+- inch/mm unit guessing
+- diagnostic SVG renderer
+- integration fixtures and outputs
+- compact `entity_map` in `geom.yaml`
+- NiceGUI app through geometry-generation stage
+- `ProjectService` local workspace flow
+- `run.cmd`
+- `run_tests.cmd`
+
+Next major work:
+
+- improve UI polish and interaction
+- add operation-plan generation flow
+- define `op.yaml`
+- use machine + planner + geom + user chat to gather missing required operation inputs
+- preview proposed operations/toolpaths
+- choose/port/reference toolpath algorithms
+- generate gcode through post processor

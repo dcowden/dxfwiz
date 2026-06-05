@@ -5,10 +5,11 @@ from typing import Any
 
 import ezdxf
 from ezdxf import path
+from ruamel.yaml import YAML
+from ruamel.yaml.comments import CommentedMap, CommentedSeq
 from shapely.geometry import Point, Polygon
 
 from dxfwiz.dxf.units import determine_length_units
-from dxfwiz.yaml_io import dump_yaml_file
 
 
 FLATTENING_DISTANCE = 0.01
@@ -77,13 +78,49 @@ def write_geometry_yaml(
             "entity_count": len(entities),
             "closed_count": closed_count,
             "open_count": open_count,
+            "ignored_count": _role_count(containment_tree, "ignored"),
             "bounding_box": bounding_box,
         },
+        "entity_map": _compact_entity_map(containment_tree),
         "entities": entities,
-        "containment_tree": containment_tree,
     }
-    dump_yaml_file(geom_yaml_path, data)
+    _dump_geometry_yaml(geom_yaml_path, data)
     return data
+
+
+def _dump_geometry_yaml(path: str | Path, data: dict[str, Any]) -> None:
+    writer = YAML()
+    writer.default_flow_style = False
+    writer.width = 120
+    writer.dump(data, Path(path))
+
+
+def _compact_entity_map(nodes: list[dict[str, Any]]) -> CommentedSeq:
+    result = CommentedSeq()
+    for node in nodes:
+        result.append(_compact_entity_node(node))
+    return result
+
+
+def _compact_entity_node(node: dict[str, Any]) -> CommentedMap:
+    compact = CommentedMap()
+    compact["entity"] = node["entity"]
+    compact["role"] = node["role"]
+    children = node.get("children", [])
+    if children:
+        compact["children"] = _compact_entity_map(children)
+    else:
+        compact.fa.set_flow_style()
+    return compact
+
+
+def _role_count(nodes: list[dict[str, Any]], role: str) -> int:
+    total = 0
+    for node in nodes:
+        if node["role"] == role:
+            total += 1
+        total += _role_count(node.get("children", []), role)
+    return total
 
 
 def _scale_entities(entities: list[dict[str, Any]], scale: float) -> list[dict[str, Any]]:
@@ -271,7 +308,11 @@ def _containment_tree(
 
     root_ids = children_by_parent.get(None, [])
     frame_ids = _frame_ids(root_ids, children_by_parent, entity_by_id)
-    semantic_root_ids = [root_id for root_id in root_ids if root_id in frame_ids or root_id not in _empty_frame_ids(root_ids, children_by_parent, entity_by_id)]
+    ignored_ids = (
+        _empty_frame_ids(root_ids, children_by_parent, entity_by_id)
+        if frame_ids
+        else set()
+    )
     depth_by_id = _depths(parent_by_id)
 
     def make_node(entity_id: str) -> dict[str, Any]:
@@ -283,14 +324,14 @@ def _containment_tree(
         )
         return {
             "entity": entity_id,
-            "role": _role_for(entity, entity_id, frame_ids, depth_by_id),
+            "role": _role_for(entity, entity_id, frame_ids, ignored_ids, depth_by_id),
             "children": [make_node(child_id) for child_id in children],
         }
 
     return [
         make_node(entity_id)
         for entity_id in sorted(
-            semantic_root_ids,
+            root_ids,
             key=lambda root_id: polygons.get(root_id, Polygon()).area,
             reverse=True,
         )
@@ -343,8 +384,11 @@ def _role_for(
     entity: dict[str, Any],
     entity_id: str,
     frame_ids: set[str],
+    ignored_ids: set[str],
     depth_by_id: dict[str, int],
 ) -> str:
+    if entity_id in ignored_ids:
+        return "ignored"
     if entity["type"] == "open_path":
         return "uncontained"
     if entity_id in frame_ids:

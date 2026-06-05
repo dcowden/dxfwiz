@@ -10,16 +10,16 @@ planner:
 defaults:
   max_tools: 1
   coordinate_system: G55
-  stock:
-    material: plywood
-    thickness: 0.25          # 1/4"
-    z_zero: stock_top
+  #stock:
+  #  material: plywood
+  #  thickness: 0.25          # 1/4"
+  #  z_zero: stock_top
   origin_location: bottom_left
   workholding: [screws]
   part_holding: [tabs]
   default_tool: t5           # 1/4" 2-flute upcut
-  milling_direction: climb   # climb | conventional
-  finishing_allowance: 0.0
+  milling_direction: conventional   # climb | conventional
+  finishing_allowance: 0.01
   tab_settings:
     enabled: true
     width: 0.2
@@ -35,6 +35,11 @@ operation_advice:
     - "Choose the largest tool that can still fit every required feature."
   geometry:
     - "A strict four-sided rectangle containing parts is a stock frame, not a part."
+    - "Mark top level, four-sided rectangles NOT containing parts as ignored entities"
     - "If no stock frame exists, ask the user for stock size before planning."
     - "For holes between 0.04 inches and 0.2 inches in diameter, prefer a drill operation."
     - "For holes between 0.2 inches and 0.6 inches in diameter, prefer a helical_drill operation."
+  strategies:
+    - "all inside holes should be full depth unless specified otherwise."
+    - "for pockets, use 40% stepover"
+    - "for inside contours and helical drills, always use a roughing pass leaving a finishing allowance"
