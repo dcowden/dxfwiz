@@ -40,6 +40,7 @@ class Defaults(StrictModel):
 
 
 class OperationAdvice(StrictModel):
+    overall: list[str] = Field(default_factory=list)
     workholding: list[str] = Field(default_factory=list)
     tools: list[str] = Field(default_factory=list)
     geometry: list[str] = Field(default_factory=list)

@@ -10,10 +10,10 @@ planner:
 defaults:
   max_tools: 1
   coordinate_system: G55
-  #stock:
-  #  material: plywood
-  #  thickness: 0.25          # 1/4"
-  #  z_zero: stock_top
+  stock:
+    material: plywood
+    thickness: 0.25          # 1/4"
+    z_zero: stock_top
   origin_location: bottom_left
   workholding: [screws]
   part_holding: [tabs]
@@ -31,6 +31,9 @@ operation_advice:
   workholding:
     - "Use screws when the stock frame has enough margin for corner fastening."
     - "Avoid placing clamps where contour operations could collide with them."
+    - "place tabs only on linear edges, and warn me if too sufficient tabs could not be located"
+    - "when locating tabs, consider the aspect ratio. for aspect ratio < 2, prefer to place at least tab on each quadrant/side.  for aspects > 2,  place tabs near the ends."
+    - "prefer to place tabs across from each other when possible, subject to other placement constraints"
   tools:
     - "Prefer one tool for the whole job when possible."
     - "Choose the largest tool that can still fit every required feature."
@@ -43,4 +46,5 @@ operation_advice:
   strategies:
     - "all inside holes should be full depth unless specified otherwise."
     - "for pockets, use 40% stepover"
-    - "for inside contours and helical drills, always use a roughing pass leaving a finishing allowance"
+    - "when finishing_allowance is greater than zero, outside part contours should use one contour operation with roughing.side_allowance set to that value and finishing.enabled true"
+    - "do not create separate finish contour operations; configure finishing inside the contour operation"

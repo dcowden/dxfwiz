@@ -53,6 +53,9 @@ class GeneratedGeometryEntity(StrictModel):
     diameter: float | None = Field(default=None, gt=0)
     lower_left: Point2D | None = None
     upper_right: Point2D | None = None
+    width: float | None = Field(default=None, gt=0)
+    height: float | None = Field(default=None, gt=0)
+    angle_deg: float | None = None
     source: Literal["planner"] = "planner"
 
 

@@ -12,7 +12,7 @@ from ezdxf import path
 from shapely.geometry import LinearRing, Polygon
 
 from dxfwiz.schemas import GeometryFile, MachineFile
-from dxfwiz.schemas.job import JobFile, Operation
+from dxfwiz.schemas.job import ContourOperation, DrillOperation, HelicalDrillOperation, JobFile, Operation
 
 
 logger = logging.getLogger(__name__)
@@ -106,7 +106,7 @@ def build_toolpath_program(
     return program
 
 
-def _emit_peck_drill(program, operation: Operation, geometry, generated, safe_z, tool) -> None:
+def _emit_peck_drill(program, operation: DrillOperation, geometry, generated, safe_z, tool) -> None:
     center = _operation_center(operation, geometry, generated)
     if center is None:
         program.warn(f"{operation.id}: cannot find drill center for {operation.entity}")
@@ -129,7 +129,7 @@ def _emit_peck_drill(program, operation: Operation, geometry, generated, safe_z,
     program.add("rapid", z=safe_z)
 
 
-def _emit_helical_drill(program, operation: Operation, geometry, generated, safe_z, tool) -> None:
+def _emit_helical_drill(program, operation: HelicalDrillOperation, geometry, generated, safe_z, tool) -> None:
     entity = _entity_by_id(geometry, generated, operation.entity)
     center = _operation_center(operation, geometry, generated)
     if center is None or entity is None:
@@ -141,7 +141,7 @@ def _emit_helical_drill(program, operation: Operation, geometry, generated, safe
         program.warn(f"{operation.id}: helical radius is zero, falling back to peck drilling")
         _emit_peck_drill(program, operation, geometry, generated, safe_z, tool)
         return
-    pitch = operation.depth_per_pass or tool.depth_per_pass or min(tool.diameter, operation.depth)
+    pitch = operation.pitch or tool.depth_per_pass or min(tool.diameter, operation.depth)
     feed = operation.feed_rate or tool.feed_rate
     plunge = operation.plunge_rate or tool.plunge_rate
     x0 = center[0] + radius
@@ -156,7 +156,7 @@ def _emit_helical_drill(program, operation: Operation, geometry, generated, safe
     program.add("rapid", z=safe_z)
 
 
-def _emit_contour(program, operation: Operation, entities, dxf_lookup, safe_z, tool) -> None:
+def _emit_contour(program, operation: ContourOperation, entities, dxf_lookup, safe_z, tool) -> None:
     entity = entities.get(operation.entity)
     if entity is None:
         program.warn(f"{operation.id}: contour entity {operation.entity} is not in geom.yaml")
@@ -165,25 +165,54 @@ def _emit_contour(program, operation: Operation, entities, dxf_lookup, safe_z, t
     if len(points) < 3:
         program.warn(f"{operation.id}: contour entity {operation.entity} has no usable path")
         return
-    offset = _offset_amount(operation.offset, tool.diameter, operation.finishing_allowance or 0.0)
-    points = _offset_closed_points(points, offset) if abs(offset) > 1e-9 else points
-    if len(points) < 3:
-        program.warn(f"{operation.id}: offset failed for {operation.entity}")
-        return
-    passes = _depth_passes(operation.depth, operation.depth_per_pass or tool.depth_per_pass or tool.diameter)
+    total_depth = operation.depth + operation.extra_depth
+    passes = _depth_passes(total_depth, operation.roughing.depth_per_pass)
     feed = operation.feed_rate or tool.feed_rate
     plunge = operation.plunge_rate or tool.plunge_rate
-    start = points[0]
     if operation.tabs and operation.tabs.enabled:
         program.add("comment", text=f"{operation.id}: tabs are listed in op.yaml; tab lifting is not yet implemented")
-    for depth in passes:
-        program.add("rapid", x=start[0], y=start[1])
-        program.add("rapid", z=safe_z)
-        program.add("feed", z=-depth, feed=plunge)
-        for x, y in points[1:]:
-            program.add("feed", x=x, y=y, feed=feed)
-        program.add("feed", x=start[0], y=start[1], feed=feed)
+    if operation.roughing.enabled:
+        rough_points = _offset_operation_points(points, operation.offset, tool.diameter, operation.roughing.side_allowance)
+        if len(rough_points) < 3:
+            program.warn(f"{operation.id}: roughing offset failed for {operation.entity}")
+            return
+        for depth in passes:
+            _emit_closed_path(program, rough_points, depth, safe_z, feed, plunge)
+    if operation.finishing.enabled:
+        finish_points = _offset_operation_points(points, operation.offset, tool.diameter, 0.0)
+        if len(finish_points) < 3:
+            program.warn(f"{operation.id}: finishing offset failed for {operation.entity}")
+            return
+        for _ in range(operation.finishing.passes):
+            _emit_closed_path(program, finish_points, total_depth, safe_z, feed, plunge)
     program.add("rapid", z=safe_z)
+
+
+def _offset_operation_points(
+    points: list[tuple[float, float]],
+    offset: str | None,
+    diameter: float,
+    side_allowance: float,
+) -> list[tuple[float, float]]:
+    amount = _offset_amount(offset, diameter, side_allowance)
+    return _offset_closed_points(points, amount) if abs(amount) > 1e-9 else points
+
+
+def _emit_closed_path(
+    program: ToolpathProgram,
+    points: list[tuple[float, float]],
+    depth: float,
+    safe_z: float,
+    feed: float,
+    plunge: float,
+) -> None:
+    start = points[0]
+    program.add("rapid", x=start[0], y=start[1])
+    program.add("rapid", z=safe_z)
+    program.add("feed", z=-depth, feed=plunge)
+    for x, y in points[1:]:
+        program.add("feed", x=x, y=y, feed=feed)
+    program.add("feed", x=start[0], y=start[1], feed=feed)
 
 
 def _load_dxf_lookup(fixed_dxf: str | Path | None) -> dict[str, Any]:

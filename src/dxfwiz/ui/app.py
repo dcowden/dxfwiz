@@ -5,16 +5,25 @@ import json
 import logging
 import os
 import re
+import time
 import urllib.request
 from html import escape
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 from nicegui import app, ui
 
 from dxfwiz.api import router as api_router
+from dxfwiz.config import load_config
 from dxfwiz.logging_config import configure_logging
-from dxfwiz.planning import PlanningRequest, PlanningResponse, load_system_planner_advice
+from dxfwiz.planning import (
+    PlanningRequest,
+    PlanningResponse,
+    generate_operation_plan,
+    load_system_planner_advice,
+)
+from dxfwiz.planning.ai_stats import ai_stats_summary
 from dxfwiz.planning.yaml_format import dump_operation_yaml
 from dxfwiz.schemas import GeometryFile, JobFile, MachineFile, OperationInputsFile, PlannerFile
 from dxfwiz.toolpaths import ToolpathRequest, ToolpathResponse
@@ -88,7 +97,7 @@ def main() -> None:
             box-shadow: 0 10px 24px rgba(37, 99, 235, 0.20);
           }
           .main-grid {
-            height: 100%; min-height: 0; display: grid; grid-template-columns: minmax(0, 1fr) 380px;
+            height: 100%; min-height: 0; display: grid; grid-template-columns: minmax(0, 1fr) 460px;
           }
           .display-card { min-height: 0; padding: 8px; background: #eef3f8; }
           .planning-panel {
@@ -98,6 +107,12 @@ def main() -> None:
           .viewer-host { height: 100%; min-height: 0; }
           .planning-scroll { flex: 1; min-height: 0; overflow: auto; padding: 14px; }
           .planning-footer { border-top: 1px solid #e2e8f0; padding: 12px; background: #ffffff; }
+          .planner-busy {
+            border: 1px solid #bfdbfe; border-radius: 7px; background: #eff6ff;
+            padding: 9px; margin-top: 10px;
+          }
+          .planner-busy.failed { border-color: #fecaca; background: #fff7f7; }
+          .planner-busy.done { border-color: #bbf7d0; background: #f0fdf4; }
           .graphics-area { height: 100%; min-height: 0; display: flex; flex-direction: column; gap: 8px; }
           .graphics-toolbar {
             flex: 0 0 auto; display: flex; align-items: center; gap: 8px;
@@ -134,6 +149,11 @@ def main() -> None:
             min-height: 100%; background: #ffffff; border: 1px solid #dbe3ef; border-radius: 8px;
             padding: 16px; display: flex; flex-direction: column; box-shadow: 0 16px 40px rgba(15, 23, 42, 0.08);
           }
+          .ai-stat-grid { display: grid; grid-template-columns: 1fr auto; gap: 10px 18px; font-size: 14px; }
+          .ai-stat-key { color: #64748b; }
+          .ai-stat-value { color: #0f172a; font-weight: 750; text-align: right; }
+          .ai-meter { height: 10px; border-radius: 999px; background: #e2e8f0; overflow: hidden; }
+          .ai-meter-fill { height: 100%; background: #2563eb; }
           .toolpaths-grid {
             height: 100%; min-height: 0; display: grid; grid-template-columns: minmax(0, 1fr) 7px 430px;
           }
@@ -190,13 +210,13 @@ def main() -> None:
           #dxfwiz-scene .selected-entity .entity-outline,
           #dxfwiz-scene .selected-entity.workholding-outline,
           #dxfwiz-scene .selected-entity .workholding-outline {
-            stroke: #ef4444 !important;
+            stroke: #dc2626 !important;
             stroke-width: 4px !important;
           }
           #dxfwiz-scene .selected-entity.entity-name-label .entity-name-text,
           #dxfwiz-scene .selected-entity.workholding-label,
           #dxfwiz-scene .selected-entity .workholding-label {
-            fill: #ef4444 !important;
+            fill: #dc2626 !important;
           }
           #dxfwiz-scene.hide-entity-labels .entity-name-label,
           #dxfwiz-scene.hide-entity-labels .workholding-label {
@@ -210,14 +230,17 @@ def main() -> None:
         </style>
         """
     )
-    ui.add_head_html(_viewer_script())
-
     with ui.element("div").classes("app-shell"):
         with ui.element("div").classes("topbar"):
             ui.label("DXF Wizard").classes("brand")
             with ui.row().classes("items-center gap-2") as crumbs:
                 state["crumbs"] = crumbs
             ui.space()
+            ui.button(
+                "AI",
+                icon="psychology",
+                on_click=render_ai_status_dialog,
+            ).props("flat dense").classes("nav-link")
             ui.button(
                 "Settings",
                 icon="settings",
@@ -228,6 +251,7 @@ def main() -> None:
             state["content"] = content
 
     render_initial_state(content, state, machine)
+    ui.timer(0.1, lambda: ui.run_javascript(_viewer_javascript()), once=True)
 
     ui.run(title="DXF Wizard", reload=False, port=int(os.environ.get("DXFWIZ_PORT", "8080")))
 
@@ -295,10 +319,32 @@ def render_project_state(content, state: dict, machine: MachineFile, artifacts: 
                         icon="play_arrow",
                     ).props("color=primary unelevated").classes("w-full mt-2")
                     generate_indicator = ui.icon("cancel").classes("input-status-missing text-xl mt-2")
+                    with ui.column().classes("planner-busy w-full") as busy_box:
+                        ui.linear_progress().props("indeterminate color=primary").classes("w-full")
+                        busy_label = ui.label("Waiting to generate.").classes("text-sm text-slate-700")
+                        busy_detail = ui.label("").classes("text-xs text-slate-500")
+                    busy_box.style("display: none")
 
-                    generate_state = {"ready": False}
+                    generate_state = {
+                        "ready": False,
+                        "busy": False,
+                        "request_id": None,
+                        "started_at": None,
+                    }
+
+                    def update_busy_status() -> None:
+                        if not generate_state["busy"] or generate_state["started_at"] is None:
+                            return
+                        elapsed = time.monotonic() - generate_state["started_at"]
+                        busy_label.text = f"Planner request is running... {elapsed:.0f}s elapsed"
+                        busy_detail.text = f"Request {generate_state['request_id']} is still active."
+
+                    ui.timer(1.0, update_busy_status)
 
                     def update_generate_state() -> None:
+                        if generate_state["busy"]:
+                            generate_button.disable()
+                            return
                         _capture_input_values(state, input_widgets, intent_input)
                         _update_input_section_status(input_widgets)
                         missing = [
@@ -318,25 +364,51 @@ def render_project_state(content, state: dict, machine: MachineFile, artifacts: 
                             generate_indicator.classes(replace="input-status-ok text-xl mt-2")
 
                     async def generate_plan() -> None:
-                        if not generate_state["ready"]:
+                        if not generate_state["ready"] or generate_state["busy"]:
                             return
+                        generate_state["busy"] = True
+                        generate_state["request_id"] = uuid4().hex[:8]
+                        generate_state["started_at"] = time.monotonic()
+                        generate_button.disable()
+                        busy_box.classes(replace="planner-busy w-full")
+                        busy_label.text = "Planner request is starting..."
+                        busy_detail.text = f"Request {generate_state['request_id']} is active."
+                        busy_box.style("")
                         state["inputs"]["planning_notes"] = intent_input.value or ""
                         request = _planning_request(machine, planner, artifacts, state)
-                        response = await _post_plan_request(request)
-                        state["inputs"]["op_yaml"] = response.op_yaml
-                        _write_project_op_yaml(artifacts, response.op_yaml)
-                        if response.geometry:
-                            state["geometry"] = response.geometry
-                            _write_project_geometry(artifacts, response.geometry)
-                        if response.errors:
-                            state["inputs"]["op_yaml"] = _issues_yaml(response)
-                            ui.notify("Plan has errors to resolve.", type="negative")
-                        elif response.warnings:
-                            ui.notify("Plan generated with warnings.", type="warning")
-                        else:
-                            ui.notify("Plan generated.", type="positive")
-                        state["plan_response"] = response
-                        render_toolpaths_state(state["content"], state)
+                        navigated = False
+                        try:
+                            response = await _post_plan_request(request)
+                            elapsed = time.monotonic() - generate_state["started_at"]
+                            state["inputs"]["op_yaml"] = response.op_yaml
+                            _write_project_op_yaml(artifacts, response.op_yaml)
+                            if response.geometry:
+                                state["geometry"] = response.geometry
+                                _write_project_geometry(artifacts, response.geometry)
+                            if response.errors:
+                                state["inputs"]["op_yaml"] = _issues_yaml(response)
+                                ui.notify("Plan has errors to resolve.", type="negative")
+                            elif response.warnings:
+                                ui.notify("Plan generated with warnings.", type="warning")
+                            else:
+                                ui.notify("Plan generated.", type="positive")
+                            state["plan_response"] = response
+                            busy_box.classes(replace="planner-busy done w-full")
+                            busy_label.text = f"Planner request completed in {elapsed:.1f}s."
+                            navigated = True
+                            render_toolpaths_state(state["content"], state)
+                        except Exception as exc:
+                            logger.exception("Operation plan generation failed")
+                            elapsed = time.monotonic() - generate_state["started_at"]
+                            busy_box.classes(replace="planner-busy failed w-full")
+                            busy_label.text = f"Planner request failed after {elapsed:.1f}s."
+                            busy_detail.text = str(exc)
+                            ui.notify(f"Plan generation failed: {exc}", type="negative")
+                        finally:
+                            generate_state["busy"] = False
+                            generate_state["started_at"] = None
+                            if not navigated:
+                                update_generate_state()
 
                     for widget in input_widgets:
                         for control in _iter_controls(widget["control"]):
@@ -361,6 +433,49 @@ def render_settings_state(content, state: dict) -> None:
                         ui.html(_yaml_pre(EXAMPLES_DIR / "machine.yaml"))
                     with ui.tab_panel(planner_tab):
                         ui.html(_yaml_pre(EXAMPLES_DIR / "planner.yaml"))
+
+
+def render_ai_status_dialog() -> None:
+    config = load_config()
+    stats = ai_stats_summary(config.gemini.token_limit)
+    last_call = stats["last_call"] or {}
+    with ui.dialog() as dialog, ui.card().classes("w-[560px] max-w-[calc(100vw-32px)]"):
+        with ui.row().classes("w-full items-center"):
+            ui.icon("psychology").classes("text-blue-700 text-2xl")
+            ui.label("AI Planner Status").classes("text-lg font-semibold text-slate-900")
+            ui.space()
+            ui.button(icon="close", on_click=dialog.close).props("flat round dense")
+        ui.label("Local usage estimates for planner calls made from this app.").classes(
+            "text-sm text-slate-600"
+        )
+        percent = min(stats["token_percent"], 100)
+        with ui.element("div").classes("ai-meter w-full mt-2"):
+            ui.element("div").classes("ai-meter-fill").style(f"width: {percent:.1f}%")
+        rows = [
+            ("Planner mode", config.planner.mode),
+            ("Model", config.gemini.model),
+            ("Token usage", f"{stats['total_tokens']:,} / {stats['token_limit']:,}"),
+            ("Remaining", f"{stats['remaining_tokens']:,}"),
+            ("Budget used", f"{stats['token_percent']:.1f}%"),
+            ("Calls", f"{stats['call_count']} total | {stats['success_count']} ok | {stats['failure_count']} failed"),
+            ("Average response", f"{stats['average_response_seconds']:.2f} s"),
+        ]
+        if last_call:
+            rows.extend(
+                [
+                    ("Last call", str(last_call.get("timestamp", ""))),
+                    ("Last tokens", f"{int(last_call.get('total_tokens') or 0):,}"),
+                    ("Last duration", f"{float(last_call.get('elapsed_seconds') or 0):.2f} s"),
+                    ("Last result", "ok" if last_call.get("success") else "failed"),
+                ]
+            )
+        with ui.element("div").classes("ai-stat-grid mt-4 w-full"):
+            for key, value in rows:
+                ui.label(key).classes("ai-stat-key")
+                ui.label(str(value)).classes("ai-stat-value")
+        if last_call.get("error"):
+            ui.label(f"Last error: {last_call['error']}").classes("text-sm text-red-700 mt-3")
+    dialog.open()
 
 
 def render_toolpaths_state(content, state: dict) -> None:
@@ -474,25 +589,14 @@ def _render_operation_groups(response: PlanningResponse | None) -> None:
             ]
             entity_ids = _operation_entity_ids(group_operations)
             with ui.element("div").classes("operation-group"):
-                ui.html(
-                    _operation_group_button(group["name"], entity_ids, len(group_operations))
-                )
+                with ui.element("button").classes("operation-group-title").props("type=button") as button:
+                    button.on("click", lambda _event, ids=entity_ids: _highlight_entities(ids))
+                    ui.html(f"<span>{escape(group['name'].replace('_', ' ').title())}</span><span>{len(group_operations)}</span>")
                 for operation in group_operations:
-                    ui.html(_operation_card(operation, _operation_entity_ids([operation])))
+                    _render_operation_card(operation, _operation_entity_ids([operation]))
 
 
-def _operation_group_button(name: str, entity_ids: list[str], count: int) -> str:
-    entities = escape(json.dumps(entity_ids))
-    return (
-        f'<button type="button" class="operation-group-title" '
-        f"onclick='dxfwizHighlightEntities(JSON.parse(this.dataset.entities))' "
-        f'data-entities="{entities}">'
-        f"<span>{escape(name.replace('_', ' ').title())}</span><span>{count}</span></button>"
-    )
-
-
-def _operation_card(operation: dict[str, Any], entity_ids: list[str]) -> str:
-    entities = escape(json.dumps(entity_ids))
+def _render_operation_card(operation: dict[str, Any], entity_ids: list[str]) -> None:
     description = operation.get("description") or operation["type"].replace("_", " ").title()
     if operation.get("tabs", {}).get("enabled"):
         description = f"{description}: tabs {operation['tabs'].get('count')}"
@@ -507,14 +611,28 @@ def _operation_card(operation: dict[str, Any], entity_ids: list[str]) -> str:
         ]
         if part and not part.endswith("None")
     )
-    operation_yaml = escape(dump_operation_yaml(operation))
-    return (
-        f'<button type="button" class="operation-card" '
-        f"onclick='dxfwizShowOperationYaml(this.dataset.yaml, JSON.parse(this.dataset.entities))' "
-        f'data-entities="{entities}" data-yaml="{operation_yaml}">'
-        f'<div class="operation-card-title">{escape(title)}</div>'
-        f'<div class="operation-card-meta">{escape(meta)}</div>'
-        f"</button>"
+    with ui.element("button").classes("operation-card").props("type=button") as button:
+        button.on("click", lambda _event, op=operation, ids=entity_ids: _show_operation_yaml(op, ids))
+        ui.html(
+            f'<div class="operation-card-title">{escape(title)}</div>'
+            f'<div class="operation-card-meta">{escape(meta)}</div>'
+        )
+
+
+def _highlight_entities(entity_ids: list[str]) -> None:
+    ui.run_javascript(
+        _viewer_action_javascript(
+            f"window.dxfwizHighlightEntities({json.dumps(entity_ids)});"
+        )
+    )
+
+
+def _show_operation_yaml(operation: dict[str, Any], entity_ids: list[str]) -> None:
+    yaml_text = dump_operation_yaml(operation)
+    ui.run_javascript(
+        _viewer_action_javascript(
+            f"window.dxfwizShowOperationYaml({json.dumps(yaml_text)}, {json.dumps(entity_ids)});"
+        )
     )
 
 
@@ -530,19 +648,19 @@ def _operation_entity_ids(operations: list[dict[str, Any]]) -> list[str]:
 def _render_graphics_area(artifacts: ProjectArtifacts, state: dict[str, Any] | None = None) -> None:
     with ui.element("div").classes("graphics-area"):
         with ui.element("div").classes("graphics-toolbar"):
-            ui.button(icon="zoom_in", on_click=lambda: ui.run_javascript("dxfwizZoom(0.82)")).props("flat dense").tooltip("Zoom in")
-            ui.button(icon="zoom_out", on_click=lambda: ui.run_javascript("dxfwizZoom(1.18)")).props("flat dense").tooltip("Zoom out")
-            ui.button(icon="fit_screen", on_click=lambda: ui.run_javascript("dxfwizInitViewer(); dxfwizResetView()")).props("flat dense").tooltip("Zoom to extents")
+            ui.button(icon="zoom_in", on_click=lambda: ui.run_javascript(_viewer_action_javascript("window.dxfwizZoom(0.82);"))).props("flat dense").tooltip("Zoom in")
+            ui.button(icon="zoom_out", on_click=lambda: ui.run_javascript(_viewer_action_javascript("window.dxfwizZoom(1.18);"))).props("flat dense").tooltip("Zoom out")
+            ui.button(icon="fit_screen", on_click=lambda: ui.run_javascript(_viewer_action_javascript("window.dxfwizResetView();"))).props("flat dense").tooltip("Zoom to extents")
             ui.separator().props("vertical")
-            ui.button(icon="rotate_left", on_click=lambda: ui.run_javascript("dxfwizRotate(-90)")).props("flat dense").tooltip("Rotate left")
-            ui.button(icon="rotate_right", on_click=lambda: ui.run_javascript("dxfwizRotate(90)")).props("flat dense").tooltip("Rotate right")
+            ui.button(icon="rotate_left", on_click=lambda: ui.run_javascript(_viewer_action_javascript("window.dxfwizRotate(-90);"))).props("flat dense").tooltip("Rotate left")
+            ui.button(icon="rotate_right", on_click=lambda: ui.run_javascript(_viewer_action_javascript("window.dxfwizRotate(90);"))).props("flat dense").tooltip("Rotate right")
             ui.separator().props("vertical")
             label_button = ui.button("Entities", icon="label").props("flat dense").classes("toggle-on")
             dim_button = ui.button("Dimensions", icon="straighten").props("flat dense").classes("toggle-on")
-            label_button.on("click", lambda: ui.run_javascript("dxfwizToggleLayer('entity-labels')"))
-            dim_button.on("click", lambda: ui.run_javascript("dxfwizToggleLayer('dimension-labels')"))
+            label_button.on("click", lambda: ui.run_javascript(_viewer_action_javascript("window.dxfwizToggleLayer('entity-labels');")))
+            dim_button.on("click", lambda: ui.run_javascript(_viewer_action_javascript("window.dxfwizToggleLayer('dimension-labels');")))
         ui.html(render_job_display(artifacts, state)).classes("graphics-host w-full")
-        ui.timer(0.1, lambda: ui.run_javascript("window.dxfwizInstallViewerHooks && window.dxfwizInstallViewerHooks()"), once=True)
+        ui.timer(0.1, lambda: ui.run_javascript(_viewer_javascript()), once=True)
 
 
 def _planning_context(
@@ -808,6 +926,7 @@ def _planning_request(
             "machine": machine.model_dump(mode="json"),
             "system_advice": load_system_planner_advice().model_dump(mode="json"),
             "user_advice": planner.operation_advice.model_dump(mode="json"),
+            "fixed_dxf": artifacts.fixed_dxf.read_text(encoding="utf-8", errors="ignore"),
             "inputs": {
                 "stock_xy": inputs.get("stock_xy"),
                 "stock_units": inputs.get("stock_units"),
@@ -840,25 +959,11 @@ def _issues_yaml(response) -> str:
 
 
 async def _post_plan_request(request: PlanningRequest) -> PlanningResponse:
-    return await asyncio.to_thread(_post_plan_request_sync, request)
+    return await asyncio.to_thread(generate_operation_plan, request)
 
 
 async def _post_toolpath_request(request: ToolpathRequest) -> ToolpathResponse:
     return await asyncio.to_thread(_post_toolpath_request_sync, request)
-
-
-def _post_plan_request_sync(request: PlanningRequest) -> PlanningResponse:
-    port = int(os.environ.get("DXFWIZ_PORT", "8080"))
-    body = json.dumps(request.model_dump(mode="json")).encode("utf-8")
-    http_request = urllib.request.Request(
-        f"http://127.0.0.1:{port}/api/plan",
-        data=body,
-        headers={"Content-Type": "application/json"},
-        method="POST",
-    )
-    with urllib.request.urlopen(http_request, timeout=30) as response:
-        data = json.loads(response.read().decode("utf-8"))
-    return PlanningResponse.model_validate(data)
 
 
 def _post_toolpath_request_sync(request: ToolpathRequest) -> ToolpathResponse:
@@ -1237,14 +1342,14 @@ def _icon_fit_screen() -> str:
     """
 
 
-def _viewer_script() -> str:
+def _viewer_javascript() -> str:
     return """
-    <script>
       window.dxfwizResetView = function() {
         const svg = document.getElementById('dxfwiz-scene');
         if (!svg || !svg.dataset.initialViewBox) return;
         svg.setAttribute('viewBox', svg.dataset.initialViewBox);
         svg.dataset.currentViewBox = svg.dataset.initialViewBox;
+        window.dxfwizUpdateLabelScale();
       };
       window.dxfwizZoom = function(factor) {
         const svg = document.getElementById('dxfwiz-scene');
@@ -1258,6 +1363,7 @@ def _viewer_script() -> str:
         vb[3] *= factor;
         svg.dataset.currentViewBox = vb.join(' ');
         svg.setAttribute('viewBox', svg.dataset.currentViewBox);
+        window.dxfwizUpdateLabelScale();
         svg.focus();
       };
       window.dxfwizRotate = function(delta) {
@@ -1305,6 +1411,21 @@ def _viewer_script() -> str:
         });
         svg.focus();
       };
+      window.dxfwizUpdateLabelScale = function() {
+        const svg = document.getElementById('dxfwiz-scene');
+        if (!svg || !svg.dataset.initialViewBox || !svg.dataset.currentViewBox) return;
+        const initial = svg.dataset.initialViewBox.split(' ').map(Number);
+        const current = svg.dataset.currentViewBox.split(' ').map(Number);
+        if (!initial[2] || !current[2]) return;
+        const factor = Math.max(0.28, Math.min(1.75, current[2] / initial[2]));
+        svg.querySelectorAll('.entity-name-text, .workholding-label').forEach(text => {
+          if (!text.dataset.baseFontSize) {
+            const raw = text.getAttribute('font-size') || window.getComputedStyle(text).fontSize || '';
+            text.dataset.baseFontSize = String(parseFloat(raw) || 1);
+          }
+          text.setAttribute('font-size', `${Number(text.dataset.baseFontSize) * factor}px`);
+        });
+      };
       window.dxfwizShowOperationYaml = function(yamlText, entityIds) {
         window.dxfwizHighlightEntities(entityIds);
         let panel = document.getElementById('operation-yaml-popover');
@@ -1314,8 +1435,21 @@ def _viewer_script() -> str:
           panel.className = 'operation-yaml-popover';
           document.body.appendChild(panel);
         }
-        panel.innerHTML = "<header><span>Operation YAML</span><button type=\"button\" aria-label=\"Dismiss\" onclick=\"this.closest('.operation-yaml-popover').remove()\">x</button></header><pre></pre>";
-        panel.querySelector('pre').textContent = yamlText || '';
+        panel.replaceChildren();
+        const header = document.createElement('header');
+        const title = document.createElement('span');
+        title.textContent = 'Operation YAML';
+        const close = document.createElement('button');
+        close.type = 'button';
+        close.setAttribute('aria-label', 'Dismiss');
+        close.textContent = 'x';
+        close.addEventListener('click', function() { panel.remove(); });
+        const pre = document.createElement('pre');
+        pre.textContent = yamlText || '';
+        header.appendChild(title);
+        header.appendChild(close);
+        panel.appendChild(header);
+        panel.appendChild(pre);
       };
 
       window.dxfwizInitSplitter = function() {
@@ -1357,6 +1491,7 @@ def _viewer_script() -> str:
         function setViewBox(vb) {
           svg.dataset.currentViewBox = vb.join(' ');
           svg.setAttribute('viewBox', svg.dataset.currentViewBox);
+          window.dxfwizUpdateLabelScale();
         }
         svg.addEventListener('selectstart', function(event) { event.preventDefault(); });
         svg.addEventListener('focus', function() { svg.dataset.zoomActive = '1'; });
@@ -1403,6 +1538,7 @@ def _viewer_script() -> str:
       };
       window.dxfwizInstallViewerHooks = function() {
         window.dxfwizInitViewer();
+        window.dxfwizUpdateLabelScale();
         window.dxfwizInitSplitter();
         if (window.dxfwizMutationObserver || !document.body) return;
         window.dxfwizMutationObserver = new MutationObserver(() => {
@@ -1416,8 +1552,11 @@ def _viewer_script() -> str:
       } else {
         window.dxfwizInstallViewerHooks();
       }
-    </script>
     """
+
+
+def _viewer_action_javascript(action: str) -> str:
+    return f"{_viewer_javascript()}\n{action}"
 
 
 def _machine_details(machine_file: MachineFile, artifacts: ProjectArtifacts | None) -> str:
@@ -1541,9 +1680,22 @@ def _workholding_layer(generated_entities: list[dict[str, Any]], geometry: dict[
             y1 = max_y - entity["upper_right"]["y"]
             y2 = max_y - entity["lower_left"]["y"]
             elements.append(f'<g class="workholding-entity" data-entity-ref="{entity_id}">')
-            elements.append(
-                f'<rect class="workholding-outline" data-entity-id="{entity_id}" x="{x1:.6f}" y="{y1:.6f}" width="{(x2 - x1):.6f}" height="{(y2 - y1):.6f}" />'
-            )
+            if entity.get("center") and entity.get("width") and entity.get("height") and entity.get("angle_deg") is not None:
+                cx = entity["center"]["x"]
+                cy = max_y - entity["center"]["y"]
+                rect_w = entity["width"]
+                rect_h = entity["height"]
+                angle = -entity["angle_deg"]
+                elements.append(
+                    f'<rect class="workholding-outline" data-entity-id="{entity_id}" '
+                    f'x="{(cx - rect_w / 2):.6f}" y="{(cy - rect_h / 2):.6f}" '
+                    f'width="{rect_w:.6f}" height="{rect_h:.6f}" '
+                    f'transform="rotate({angle:.6f} {cx:.6f} {cy:.6f})" />'
+                )
+            else:
+                elements.append(
+                    f'<rect class="workholding-outline" data-entity-id="{entity_id}" x="{x1:.6f}" y="{y1:.6f}" width="{(x2 - x1):.6f}" height="{(y2 - y1):.6f}" />'
+                )
             if entity.get("role") != "tab":
                 elements.append(
                     f'<text class="workholding-label" data-entity-ref="{entity_id}" x="{x2:.6f}" y="{y1:.6f}" font-size="{font_size:.6f}px">{entity_id}</text>'

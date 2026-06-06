@@ -1,7 +1,15 @@
 schema_version: "1.0"
 
 operation_advice:
+  overall:
+    - "Do not invent source DXF entities. If you add screws, tabs, or clamps, list them under generated_entities and reference those ids from operations."
+    - "Use operation_groups with these exact names when present: fixtures, internal_pockets, internal_holes, and contours."
+    - "For through cuts, depth should be stock thickness plus cut_deeper_than_stock."
+    - "Each operation must reference exactly one entity. Multiple holes or multiple contours must be represented as multiple operations."
+    - "Do not create separate finishing operations. Finishing is configured inside the same contour, pocket, or helical_drill operation."
+    - "When finishing_allowance is greater than zero, every outside part contour operation should set roughing.side_allowance to that value and finishing.enabled to true."
   workholding:
+    - "For screw workholding, place screw holes in scrap areas when a stock frame and part geometry are present."
     - "If using tabs, tabs should be 0.06 inches tall for polycarbonate and 0.1 inches tall for wood or plywood."
     - "Tabs should be placed on linear segments. If enough straight locations are not available, warn the user."
     - "Tab width should be 1x material thickness."
@@ -45,5 +53,6 @@ operation_advice:
     - "For aluminum, use conventional cutting for all passes except finishing passes."
     - "Use ramp or helical entry for pockets and avoid straight plunges when practical."
     - "Machine interior features before exterior contours to keep parts attached and registration stable."
-    - "Leave finishing allowance on roughing passes when the operation includes a finishing pass."
+    - "For outside part boundaries with finishing_allowance greater than zero, create one contour operation with roughing.side_allowance set to the requested value."
+    - "For outside part boundaries with finishing_allowance greater than zero, set finishing.enabled true on the same contour operation and set finishing.milling_direction to climb. Finishing depth is computed from operation depth plus extra_depth."
     - "Warn if the requested max_tools exceeds machine max_tools and the machine has no tool changer, because manual tool changes will be required."

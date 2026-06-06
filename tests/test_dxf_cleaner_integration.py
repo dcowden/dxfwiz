@@ -165,7 +165,7 @@ def test_real_dxf_operation_plan_outputs_op_yaml(case):
         operation
         for operation in operations
         if operation["type"] == "contour"
-        and operation.get("finishing_pass", {}).get("enabled")
+        and operation.get("finishing", {}).get("enabled")
     ]
 
     assert geometry.summary.entity_count == assertions["total_entities"]
@@ -394,6 +394,7 @@ def _planning_request(
             "machine": machine.model_dump(mode="json"),
             "system_advice": load_system_planner_advice().model_dump(mode="json"),
             "user_advice": planner.operation_advice.model_dump(mode="json"),
+            "fixed_dxf": case.fixed_path.read_text(encoding="utf-8", errors="ignore"),
             "inputs": {
                 "stock_xy": _stock_size_from_geometry(geometry),
                 "stock_units": geometry.units.length,

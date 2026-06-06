@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import logging
+import math
+from io import StringIO
 from importlib.resources import files
 from typing import Any, Literal
 
+import ezdxf
 from pydantic import Field
 from ruamel.yaml import YAML
 
@@ -46,6 +49,7 @@ class PlanningRequest(StrictModel):
     system_advice: OperationAdvice
     user_advice: OperationAdvice
     inputs: PlannerInputs
+    fixed_dxf: str | None = None
 
 
 class PlanningResponse(StrictModel):
@@ -54,6 +58,9 @@ class PlanningResponse(StrictModel):
     geometry: dict[str, Any] | None = None
     plan: dict[str, Any] | None = None
     op_yaml: str = ""
+
+
+TAB_TARGET_COUNT = 4
 
 
 def load_system_planner_advice() -> OperationAdvice:
@@ -81,9 +88,15 @@ def generate_operation_plan(request: PlanningRequest, client: Any | None = None)
     response = planner_client.generate(request)
     response.warnings = [*warnings, *response.warnings]
     if response.plan:
+        repair_warnings = _normalize_operation_plan(request, response.plan)
+        response.warnings = [*response.warnings, *repair_warnings]
         job = JobFile.model_validate(response.plan)
+        plan_data = job.model_dump(mode="json", exclude_none=True)
+        response.plan = plan_data
+        response.geometry = _geometry_with_generated_entities(request.geometry, plan_data)
+        response.op_yaml = _dump_yaml(plan_data)
         logger.info(
-            "Generated AI operation plan with %d operation(s) and %d warning(s)",
+            "Generated operation plan with %d operation(s) and %d warning(s)",
             len(job.operations),
             len(response.warnings),
         )
@@ -99,15 +112,218 @@ def _planner_client_from_config():
     return GeminiPlannerClient(config.gemini)
 
 
+def _normalize_operation_plan(request: PlanningRequest, plan: dict[str, Any]) -> list[PlanningIssue]:
+    part_ids = {
+        node["entity"]
+        for node in _flatten_nodes([node.model_dump() for node in request.geometry.entity_map])
+        if node.get("role") == "part"
+    }
+    operations = plan.get("operations", [])
+    if not isinstance(operations, list):
+        return []
+
+    warnings: list[PlanningIssue] = []
+    finish_entities: set[str] = set()
+    for operation in operations:
+        if not isinstance(operation, dict) or not _is_outside_part_contour(operation, part_ids):
+            continue
+        if _is_finish_contour(operation):
+            finish_entities.add(operation["entity"])
+
+    new_operations: list[dict[str, Any]] = []
+    removed_finish_count = 0
+    updated_finish_count = 0
+    for operation in operations:
+        if not isinstance(operation, dict):
+            continue
+        if _is_outside_part_contour(operation, part_ids) and _is_finish_contour(operation):
+            removed_finish_count += 1
+            continue
+        if _normalize_operation_fields(request, operation, finish_entities, part_ids):
+            updated_finish_count += 1
+        new_operations.append(operation)
+
+    plan["operations"] = new_operations
+    _normalize_operation_groups(plan, [op["id"] for op in new_operations if op.get("type") == "contour"], [])
+    if removed_finish_count:
+        warnings.append(
+            PlanningIssue(
+                code="separate_finish_contours_merged",
+                message=(
+                    f"Merged {removed_finish_count} separate finish contour operation(s) into their parent "
+                    "contour operation finishing settings."
+                ),
+            )
+        )
+    if updated_finish_count and request.inputs.finishing_allowance > 0:
+        warnings.append(
+            PlanningIssue(
+                code="contour_finishing_settings_repaired",
+                message="Updated contour operation finishing settings to match the requested finishing allowance.",
+            )
+        )
+    return warnings
+
+
+def _is_outside_part_contour(operation: dict[str, Any], part_ids: set[str]) -> bool:
+    return (
+        operation.get("type") == "contour"
+        and operation.get("offset") == "outside"
+        and operation.get("entity") in part_ids
+    )
+
+
+def _is_finish_contour(operation: dict[str, Any]) -> bool:
+    finishing = operation.get("finishing") or {}
+    if finishing.get("enabled"):
+        return "finish" in str(operation.get("description", "")).lower()
+    finishing_pass = operation.get("finishing_pass") or {}
+    if finishing_pass.get("enabled"):
+        return True
+    return "finish" in str(operation.get("description", "")).lower()
+
+
+def _normalize_operation_fields(
+    request: PlanningRequest,
+    operation: dict[str, Any],
+    finish_entities: set[str],
+    part_ids: set[str],
+) -> bool:
+    tool = _tool_for_operation(request, operation)
+    depth_per_pass = operation.pop("depth_per_pass", None) or tool.depth_per_pass or tool.diameter
+    milling_direction = operation.pop("milling_direction", None) or _milling_direction(
+        request.inputs.stock_material or "",
+        tool.flute_spiral,
+    )
+    feed_rate = operation.get("feed_rate")
+    plunge_rate = operation.get("plunge_rate")
+    if operation["type"] == "contour":
+        side_allowance = operation.pop("finishing_allowance", None)
+        if side_allowance is None:
+            side_allowance = request.inputs.finishing_allowance
+        operation.pop("finishing_pass", None)
+        operation.setdefault("offset", "outside")
+        if operation["offset"] == "none":
+            operation["offset"] = "on"
+        operation.setdefault("extra_depth", 0.0)
+        operation["roughing"] = {
+            **operation.get("roughing", {}),
+            "enabled": True,
+            "depth_per_pass": depth_per_pass,
+            "side_allowance": side_allowance,
+            "bottom_allowance": 0.0,
+            "milling_direction": operation.get("roughing", {}).get("milling_direction", milling_direction),
+        }
+        finishing_required = (
+            operation.get("entity") in finish_entities
+            or (request.inputs.finishing_allowance > 0 and operation.get("entity") in part_ids and operation.get("offset") == "outside")
+        )
+        operation["finishing"] = {
+            **operation.get("finishing", {}),
+            "enabled": bool(operation.get("finishing", {}).get("enabled") or finishing_required),
+            "side": True,
+            "bottom": False,
+            "passes": operation.get("finishing", {}).get("passes", 1),
+            "milling_direction": operation.get("finishing", {}).get("milling_direction") or "climb",
+        }
+        return finishing_required
+    if operation["type"] == "pocket":
+        finishing_pass = operation.pop("finishing_pass", None) or {}
+        operation["roughing"] = {
+            **operation.get("roughing", {}),
+            "enabled": True,
+            "depth_per_pass": depth_per_pass,
+            "side_allowance": operation.get("roughing", {}).get("side_allowance", request.inputs.finishing_allowance),
+            "bottom_allowance": operation.get("roughing", {}).get("bottom_allowance", request.inputs.finishing_allowance),
+            "milling_direction": operation.get("roughing", {}).get("milling_direction", milling_direction),
+        }
+        operation["finishing"] = {
+            **operation.get("finishing", {}),
+            "enabled": bool(operation.get("finishing", {}).get("enabled", finishing_pass.get("enabled", True))),
+            "side": True,
+            "bottom": True,
+            "passes": operation.get("finishing", {}).get("passes", 1),
+            "milling_direction": operation.get("finishing", {}).get("milling_direction") or "climb",
+        }
+    if operation["type"] == "helical_drill":
+        operation.setdefault("pitch", depth_per_pass)
+        operation.setdefault("milling_direction", milling_direction)
+        operation["finishing"] = {
+            **operation.get("finishing", {}),
+            "enabled": operation.get("finishing", {}).get("enabled", True),
+            "side": True,
+            "bottom": False,
+            "passes": operation.get("finishing", {}).get("passes", 1),
+            "milling_direction": operation.get("finishing", {}).get("milling_direction") or milling_direction,
+        }
+    if operation["type"] == "drill":
+        operation.setdefault("peck_depth", min(operation["depth"], depth_per_pass))
+        operation.setdefault("retract_amount", request.machine.machine.clear_z)
+    if feed_rate is not None:
+        operation["feed_rate"] = feed_rate
+    if plunge_rate is not None:
+        operation["plunge_rate"] = plunge_rate
+    return False
+
+
+def _tool_for_operation(request: PlanningRequest, operation: dict[str, Any]):
+    machine_tools = {tool.id: tool for tool in request.machine.tools}
+    return machine_tools.get(operation.get("tool")) or _best_tool(request)
+
+
+def _normalize_operation_groups(plan: dict[str, Any], contour_ids: list[str], finish_ids: list[str]) -> None:
+    groups = plan.get("operation_groups")
+    if not isinstance(groups, list):
+        groups = []
+        plan["operation_groups"] = groups
+    normalized: dict[str, dict[str, Any]] = {}
+    result: list[dict[str, Any]] = []
+    for group in groups:
+        if not isinstance(group, dict):
+            continue
+        name = _canonical_group_name(str(group.get("name", "")))
+        if name == "finish_contours":
+            continue
+        operations = [str(op_id) for op_id in group.get("operations", [])]
+        if name in normalized:
+            _append_unique(normalized[name]["operations"], operations)
+            continue
+        normalized[name] = {"name": name, "operations": operations}
+        result.append(normalized[name])
+    contours = normalized.setdefault("contours", {"name": "contours", "operations": []})
+    if contours not in result:
+        result.append(contours)
+    _append_unique(contours["operations"], contour_ids)
+    plan["operation_groups"] = result
+
+
+def _canonical_group_name(name: str) -> str:
+    value = name.strip().lower().replace(" ", "_").replace("-", "_")
+    if value in {"outer_contours", "outer_contour", "contour"}:
+        return "contours"
+    if value in {"finishing_contours", "finishing_contour", "finish_contour"}:
+        return "finish_contours"
+    return value or "operations"
+
+
+def _append_unique(target: list[str], values: list[str]) -> None:
+    seen = set(target)
+    for value in values:
+        if value not in seen:
+            target.append(value)
+            seen.add(value)
+
+
 class LocalPlannerClient:
     def generate(self, request: PlanningRequest) -> PlanningResponse:
         logger.info("Using local deterministic operation planner")
-        plan = _build_plan(request, [])
+        warnings: list[PlanningIssue] = []
+        plan = _build_plan(request, warnings)
         job = JobFile.model_validate(plan)
         plan_data = job.model_dump(mode="json", exclude_none=True)
         return PlanningResponse(
             errors=[],
-            warnings=[],
+            warnings=warnings,
             geometry=_geometry_with_generated_entities(request.geometry, plan_data),
             plan=plan_data,
             op_yaml=_dump_yaml(plan_data),
@@ -218,9 +434,8 @@ def _build_plan(request: PlanningRequest, warnings: list[PlanningIssue]) -> dict
         "internal_pockets": [],
         "internal_holes": [],
         "contours": [],
-        "finish_contours": [],
     }
-    cut_depth = stock_thickness + _cut_deeper_than_stock(request)
+    cut_depth = stock_thickness
 
     if "screws" in inputs.workholding_method:
         for entity in _screw_entities(geometry, tool.diameter, inputs.screw_spacing):
@@ -255,32 +470,19 @@ def _build_plan(request: PlanningRequest, warnings: list[PlanningIssue]) -> dict
         entity = entities.get(node["entity"])
         if entity is None or node["role"] != "part":
             continue
-        rough = _contour_operation(
+        contour = _contour_operation(
             len(operations) + 1,
             entity,
             tool.id,
             cut_depth,
-            "conventional",
             inputs,
             request,
-            finish=False,
+            warnings,
         )
-        operations.append(rough)
-        groups["contours"].append(rough["id"])
-        if rough.get("tabs", {}).get("locations"):
-            generated_entities.extend(_tab_entities(rough["entity"], rough["tabs"]["locations"]))
-        finish = _contour_operation(
-            len(operations) + 1,
-            entity,
-            tool.id,
-            cut_depth,
-            "climb",
-            inputs,
-            request,
-            finish=True,
-        )
-        operations.append(finish)
-        groups["finish_contours"].append(finish["id"])
+        operations.append(contour)
+        groups["contours"].append(contour["id"])
+        if contour.get("tabs", {}).get("locations"):
+            generated_entities.extend(_tab_entities(contour["entity"], contour["tabs"]["locations"]))
 
     if not operations:
         warnings.append(
@@ -353,9 +555,21 @@ def _pocket_operation(index: int, entity_id: str, tool_id: str, depth: float, di
         "depth": depth,
         "stepover_percent": 40,
         "strategy": "offset",
-        "milling_direction": direction,
-        "finishing_pass": {"enabled": True, "allowance": 0.004},
-        "lead_in": {"type": "line", "length": 0.2},
+        "roughing": {
+            "enabled": True,
+            "depth_per_pass": 0.08,
+            "side_allowance": 0.004,
+            "bottom_allowance": 0.004,
+            "milling_direction": direction,
+        },
+        "finishing": {
+            "enabled": True,
+            "side": True,
+            "bottom": True,
+            "passes": 1,
+            "milling_direction": "climb",
+        },
+        "lead_in": {"type": "ramp", "length": 0.2},
     }
 
 
@@ -373,7 +587,21 @@ def _hole_operation(index: int, entity, tool_id: str, depth: float, direction: s
     if op_type == "drill":
         operation.update({"peck_depth": min(depth, 0.12), "retract_amount": 0.04, "dwell_time": 0.2})
     else:
-        operation.update({"milling_direction": direction, "stepover_percent": 35, "lead_in": {"type": "line", "length": 0.2}})
+        operation.update(
+            {
+                "hole_diameter": diameter,
+                "pitch": min(depth, 0.08),
+                "milling_direction": direction,
+        "finishing": {
+            "enabled": True,
+            "side": True,
+            "bottom": False,
+                    "passes": 1,
+                    "milling_direction": direction,
+                },
+                "lead_in": {"type": "arc", "length": 0.2},
+            }
+        )
     return operation
 
 
@@ -382,36 +610,57 @@ def _contour_operation(
     entity,
     tool_id: str,
     depth: float,
-    direction: str,
     inputs: PlannerInputs,
     request: PlanningRequest,
-    finish: bool,
+    warnings: list[PlanningIssue],
 ) -> dict[str, Any]:
     entity_id = entity.id
-    tabs_enabled = "tabs" in request.machine.machine.part_holding and not finish
+    tabs_enabled = "tabs" in request.machine.machine.part_holding
     tab_height = 0.06 if (inputs.stock_material or "").lower() == "polycarbonate" else 0.1
-    finishing_allowance = 0.0 if finish else request.inputs.finishing_allowance
     tab_width = max(inputs.stock_thickness or depth, 0.01)
-    tab_locations = _tab_locations(entity, tab_width, tab_height) if tabs_enabled else []
+    tab_locations = _tab_locations(entity, tab_width, tab_height, request) if tabs_enabled else []
+    if tabs_enabled and len(tab_locations) < TAB_TARGET_COUNT:
+        warnings.append(
+            PlanningIssue(
+                code="insufficient_tab_locations",
+                entity=entity_id,
+                message=(
+                    f"Could only place {len(tab_locations)}/{TAB_TARGET_COUNT} tabs on {entity_id}; "
+                    "the deterministic planner only places tabs on known straight line locations."
+                ),
+            )
+        )
     return {
         "id": f"op{index}",
         "type": "contour",
-        "description": f"{'Finish ' if finish else 'Rough '}outer contour for part {entity_id}",
+        "description": f"Outer contour for part {entity_id}",
         "entity": entity_id,
         "offset": "outside",
         "tool": tool_id,
         "depth": depth,
-        "milling_direction": direction,
-        "finishing_allowance": finishing_allowance,
-        "finishing_pass": {"enabled": finish, "allowance": 0.0},
+        "extra_depth": _cut_deeper_than_stock(request),
+        "roughing": {
+            "enabled": True,
+            "depth_per_pass": _tool_for_operation(request, {"tool": tool_id}).depth_per_pass or depth,
+            "side_allowance": request.inputs.finishing_allowance,
+            "bottom_allowance": 0.0,
+            "milling_direction": "conventional",
+        },
+        "finishing": {
+            "enabled": request.inputs.finishing_allowance > 0,
+            "side": True,
+            "bottom": False,
+            "passes": 1,
+            "milling_direction": "climb",
+        },
         "tabs": {
             "enabled": tabs_enabled,
             "width": tab_width,
             "height": min(tab_height, depth),
-            "count": len(tab_locations) if tab_locations else 4,
+            "count": len(tab_locations),
             "locations": tab_locations,
         },
-        "lead_in": {"type": "line", "length": 0.25},
+        "lead_in": {"type": "ramp", "length": 0.25},
     }
 
 
@@ -542,27 +791,127 @@ def _frame_or_summary_bounds(geometry: GeometryFile) -> tuple[float, float, floa
     return box.min.x, box.min.y, box.max.x, box.max.y
 
 
-def _tab_locations(entity, width: float, height: float) -> list[dict[str, Any]]:
+def _tab_locations(entity, width: float, height: float, request: PlanningRequest) -> list[dict[str, Any]]:
+    segment_tabs = _tab_locations_from_dxf(entity, width, height, request)
+    if segment_tabs:
+        return segment_tabs
     box = entity.bounding_box
     if box is None:
         return []
+    if entity.shape not in {"rectangle", "polyline"}:
+        return []
     min_x, min_y, max_x, max_y = box.min.x, box.min.y, box.max.x, box.max.y
-    half_w = width / 2
-    half_h = height / 2
-    centers = [
-        ((min_x + max_x) / 2, min_y),
-        (max_x, (min_y + max_y) / 2),
-        ((min_x + max_x) / 2, max_y),
-        (min_x, (min_y + max_y) / 2),
-    ]
+    if max_x <= min_x or max_y <= min_y:
+        return []
+    horizontal = min(width, max_x - min_x)
+    vertical = min(width, max_y - min_y)
+    thickness = height
     return [
-        {
-            "center": {"x": x, "y": y},
-            "lower_left": {"x": x - half_w, "y": y - half_h},
-            "upper_right": {"x": x + half_w, "y": y + half_h},
-        }
-        for x, y in centers
+        _tab_rectangle((min_x + max_x) / 2, min_y, horizontal, thickness, 0.0),
+        _tab_rectangle(max_x, (min_y + max_y) / 2, vertical, thickness, 90.0),
+        _tab_rectangle((min_x + max_x) / 2, max_y, horizontal, thickness, 0.0),
+        _tab_rectangle(min_x, (min_y + max_y) / 2, vertical, thickness, 90.0),
     ]
+
+
+def _tab_locations_from_dxf(entity, width: float, height: float, request: PlanningRequest) -> list[dict[str, Any]]:
+    if not request.fixed_dxf:
+        return []
+    dxf_entity = _dxf_entity_for_geometry_entity(entity, request.fixed_dxf)
+    if dxf_entity is None or dxf_entity.dxftype() != "LWPOLYLINE":
+        return []
+    scale = request.geometry.units.coordinate_scale
+    segments = _straight_polyline_segments(dxf_entity, scale)
+    minimum_length = width * 1.05
+    candidates = [segment for segment in segments if segment["length"] >= minimum_length]
+    if not candidates:
+        return []
+    selected = _spread_segments(candidates, TAB_TARGET_COUNT)
+    return [
+        _tab_rectangle(
+            segment["center"][0],
+            segment["center"][1],
+            width,
+            height,
+            segment["angle_deg"],
+        )
+        for segment in selected
+    ]
+
+
+def _dxf_entity_for_geometry_entity(entity, fixed_dxf: str):
+    try:
+        doc = ezdxf.read(StringIO(fixed_dxf))
+    except Exception:
+        logger.exception("Failed to read fixed DXF from planning request for tab placement")
+        return None
+    for ref in entity.source_refs:
+        if ref.kind == "dxf_handle":
+            return doc.entitydb.get(ref.value)
+    return None
+
+
+def _straight_polyline_segments(dxf_entity, scale: float) -> list[dict[str, Any]]:
+    points = list(dxf_entity.get_points("xyseb"))
+    if len(points) < 2:
+        return []
+    pairs = [(points[index], points[index + 1]) for index in range(len(points) - 1)]
+    if dxf_entity.closed:
+        pairs.append((points[-1], points[0]))
+    segments = []
+    for start, end in pairs:
+        bulge = float(start[4])
+        if abs(bulge) > 1e-6:
+            continue
+        x1, y1 = float(start[0]) * scale, float(start[1]) * scale
+        x2, y2 = float(end[0]) * scale, float(end[1]) * scale
+        dx = x2 - x1
+        dy = y2 - y1
+        length = (dx * dx + dy * dy) ** 0.5
+        if length <= 1e-9:
+            continue
+        segments.append(
+            {
+                "center": ((x1 + x2) / 2, (y1 + y2) / 2),
+                "length": length,
+                "angle_deg": math.degrees(math.atan2(dy, dx)),
+                "sort_angle": math.atan2((y1 + y2) / 2, (x1 + x2) / 2),
+            }
+        )
+    return segments
+
+
+def _spread_segments(segments: list[dict[str, Any]], count: int) -> list[dict[str, Any]]:
+    ordered = sorted(segments, key=lambda segment: segment["sort_angle"])
+    if len(ordered) <= count:
+        return ordered
+    step = len(ordered) / count
+    return [ordered[min(int(index * step), len(ordered) - 1)] for index in range(count)]
+
+
+def _tab_rectangle(center_x: float, center_y: float, length: float, thickness: float, angle_deg: float) -> dict[str, Any]:
+    radians = math.radians(angle_deg)
+    ux, uy = math.cos(radians), math.sin(radians)
+    nx, ny = -uy, ux
+    half_length = length / 2
+    half_thickness = thickness / 2
+    corners = [
+        (
+            center_x + ux * sx * half_length + nx * sy * half_thickness,
+            center_y + uy * sx * half_length + ny * sy * half_thickness,
+        )
+        for sx, sy in [(-1, -1), (1, -1), (1, 1), (-1, 1)]
+    ]
+    xs = [point[0] for point in corners]
+    ys = [point[1] for point in corners]
+    return {
+        "center": {"x": center_x, "y": center_y},
+        "lower_left": {"x": min(xs), "y": min(ys)},
+        "upper_right": {"x": max(xs), "y": max(ys)},
+        "width": length,
+        "height": thickness,
+        "angle_deg": angle_deg,
+    }
 
 
 def _tab_entities(part_id: str, locations: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -576,6 +925,9 @@ def _tab_entities(part_id: str, locations: list[dict[str, Any]]) -> list[dict[st
                 "center": location["center"],
                 "lower_left": location["lower_left"],
                 "upper_right": location["upper_right"],
+                "width": location.get("width"),
+                "height": location.get("height"),
+                "angle_deg": location.get("angle_deg"),
             }
         )
     return entities

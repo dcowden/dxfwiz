@@ -25,17 +25,28 @@ operations:
     type: contour
     description: "Outer profile with tabs"
     entity: e1
-    offset: outside #other choices: inside, none.
+    offset: outside # other choices: inside, on
     tool: t5
-    depth: 0.25               # full depth
-    milling_direction: climb
-    finishing_allowance: 0.0
-    tabs:   #must be optional
+    depth: 0.25
+    extra_depth: 0.01
+    roughing:
+      enabled: true
+      depth_per_pass: 0.08
+      side_allowance: 0.01
+      bottom_allowance: 0.0
+      milling_direction: conventional
+    finishing:
+      enabled: true
+      side: true
+      bottom: false
+      passes: 1
+      milling_direction: climb
+    tabs:
       enabled: true
       width: 0.2
       height: 0.06
       count: 4
-    lead_in: { type: arc, radius: 0.12 } #must be optional
+    lead_in: { type: ramp, length: 0.25 }
 
   - id: op2
     type: drill
@@ -64,8 +75,17 @@ operations:
     tool: t5
     depth: 0.125              # partial depth pocket
     stepover_percent: 40
-    strategy: parallel
-    milling_direction: climb
-    finishing_pass:
+    strategy: offset
+    roughing:
       enabled: true
-      allowance: 0.004
+      depth_per_pass: 0.06
+      side_allowance: 0.004
+      bottom_allowance: 0.004
+      milling_direction: climb
+    finishing:
+      enabled: true
+      side: true
+      bottom: true
+      passes: 1
+      milling_direction: climb
+    lead_in: { type: ramp, length: 0.2 }

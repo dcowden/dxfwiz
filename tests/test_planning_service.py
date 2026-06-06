@@ -27,6 +27,41 @@ def test_planner_returns_errors_for_missing_required_inputs(tmp_path):
     }
 
 
+def test_system_planner_advice_yaml_loads():
+    advice = load_system_planner_advice()
+
+    assert advice.strategies
+    assert advice.workholding
+
+
+def test_ai_prompt_uses_geom_without_raw_dxf(tmp_path):
+    from dxfwiz.planning.ai import _planner_prompt
+
+    request = _planning_request(
+        tmp_path,
+        inputs={
+            "stock_xy": "9.500 x 48.000 in frame",
+            "stock_units": "in",
+            "stock_thickness": 0.25,
+            "stock_material": "plywood",
+            "z_zero_position": "stock_top",
+            "coordinate_system": "G55",
+            "workholding_method": ["screws"],
+            "tools": "t5",
+        },
+    )
+    request.fixed_dxf = "RAW_DXF_SENTINEL_SHOULD_NOT_APPEAR"
+
+    prompt = _planner_prompt(request)
+
+    assert "GEOM_YAML:" in prompt
+    assert "entities:" in prompt
+    assert "RAW_DXF_SENTINEL_SHOULD_NOT_APPEAR" not in prompt
+    assert "FIXED_DXF:" not in prompt
+    assert "Do not create separate finish operations" in prompt
+    assert "roughing.side_allowance" in prompt
+
+
 def test_planner_calls_ai_client_for_operation_plan(tmp_path):
     request = _planning_request(
         tmp_path,
@@ -63,6 +98,39 @@ def test_planner_calls_ai_client_for_operation_plan(tmp_path):
     assert job.tools[0].diameter == 0.25
 
 
+def test_ai_plan_missing_contour_finishing_settings_is_repaired(tmp_path):
+    request = _planning_request(
+        tmp_path,
+        inputs={
+            "stock_xy": "9.500 x 48.000 in frame",
+            "stock_units": "in",
+            "stock_thickness": 0.25,
+            "stock_material": "plywood",
+            "z_zero_position": "stock_top",
+            "coordinate_system": "G55",
+            "workholding_method": ["screws"],
+            "tools": "t5",
+            "cut_deeper_than_stock": 0.01,
+            "finishing_allowance": 0.01,
+        },
+    )
+    response = generate_operation_plan(request, client=MissingFinishPlannerClient())
+
+    assert response.errors == []
+    assert any(warning.code == "contour_finishing_settings_repaired" for warning in response.warnings)
+    job = JobFile.model_validate(response.plan)
+    contour_operations = [
+        operation
+        for operation in job.operations
+        if operation.type == "contour"
+        and operation.offset == "outside"
+    ]
+    assert contour_operations
+    assert all(operation.finishing.enabled for operation in contour_operations)
+    assert all(operation.roughing.side_allowance == 0.01 for operation in contour_operations)
+    assert "contours" in {group.name for group in job.operation_groups}
+
+
 class FakePlannerClient:
     def __init__(self) -> None:
         self.called = False
@@ -81,6 +149,17 @@ class FakePlannerClient:
             plan=plan_data,
             op_yaml=_dump_yaml(plan_data),
         )
+
+
+class MissingFinishPlannerClient(FakePlannerClient):
+    def generate(self, request: PlanningRequest) -> PlanningResponse:
+        response = super().generate(request)
+        for operation in response.plan["operations"]:
+            if operation.get("type") == "contour":
+                operation["roughing"]["side_allowance"] = 0.0
+                operation["finishing"]["enabled"] = False
+        response.op_yaml = ""
+        return response
 
 
 def _planning_request(tmp_path, inputs):
@@ -102,6 +181,7 @@ def _planning_request(tmp_path, inputs):
             "machine": machine.model_dump(mode="json"),
             "system_advice": load_system_planner_advice().model_dump(mode="json"),
             "user_advice": planner.operation_advice.model_dump(mode="json"),
+            "fixed_dxf": fixed.read_text(encoding="utf-8", errors="ignore"),
             "inputs": inputs,
         }
     )

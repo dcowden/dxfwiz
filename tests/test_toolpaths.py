@@ -69,9 +69,42 @@ def test_uccnc_toolpaths_include_setup_drill_helix_and_contour():
                 }
             ],
             "operations": [
-                {"id": "op1", "type": "drill", "entity": "wh1", "tool": "t5", "depth": 0.2, "peck_depth": 0.1},
-                {"id": "op2", "type": "helical_drill", "entity": "e1", "tool": "t5", "depth": 0.26},
-                {"id": "op3", "type": "contour", "entity": "e2", "tool": "t5", "depth": 0.26, "offset": "outside"},
+                {
+                    "id": "op1",
+                    "type": "drill",
+                    "entity": "wh1",
+                    "tool": "t5",
+                    "depth": 0.2,
+                    "peck_depth": 0.1,
+                    "retract_amount": 0.04,
+                },
+                {
+                    "id": "op2",
+                    "type": "helical_drill",
+                    "entity": "e1",
+                    "tool": "t5",
+                    "depth": 0.26,
+                    "pitch": 0.08,
+                    "milling_direction": "climb",
+                    "finishing": {"enabled": True, "side": True, "bottom": False},
+                },
+                {
+                    "id": "op3",
+                    "type": "contour",
+                    "entity": "e2",
+                    "tool": "t5",
+                    "depth": 0.25,
+                    "extra_depth": 0.01,
+                    "offset": "outside",
+                    "roughing": {
+                        "enabled": True,
+                        "depth_per_pass": 0.08,
+                        "side_allowance": 0.0,
+                        "bottom_allowance": 0.0,
+                        "milling_direction": "climb",
+                    },
+                    "finishing": {"enabled": False},
+                },
             ],
         }
     )

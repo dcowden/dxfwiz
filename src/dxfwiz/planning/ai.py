@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from typing import Protocol
 
 import instructor
@@ -8,6 +9,7 @@ import litellm
 from pydantic import Field
 
 from dxfwiz.config import GeminiConfig
+from dxfwiz.planning.ai_stats import AiCallStats, record_ai_call
 from dxfwiz.planning.service import PlanningIssue, PlanningRequest, PlanningResponse
 from dxfwiz.planning.yaml_format import dump_operation_yaml
 from dxfwiz.schemas.common import StrictModel
@@ -50,6 +52,18 @@ class GeminiPlannerClient:
 
         logger.info("Calling Gemini operation planner model %s", self.config.model)
         client = instructor.from_litellm(litellm.completion, mode=instructor.Mode.JSON)
+        messages = [
+            {
+                "role": "system",
+                "content": "You are an expert CNC router operation planner.",
+            },
+            {
+                "role": "user",
+                "content": _planner_prompt(request),
+            },
+        ]
+        prompt_tokens = _count_tokens(self.config.model, messages=messages)
+        start_time = time.perf_counter()
         try:
             result = client.chat.completions.create(
                 response_model=PlanningAiResult,
@@ -58,18 +72,20 @@ class GeminiPlannerClient:
                 timeout=self.config.timeout_seconds,
                 temperature=self.config.temperature,
                 max_retries=self.config.max_retries,
-                messages=[
-                    {
-                        "role": "system",
-                        "content": "You are an expert CNC router operation planner.",
-                    },
-                    {
-                        "role": "user",
-                        "content": _planner_prompt(request),
-                    },
-                ],
+                messages=messages,
             )
         except Exception as exc:
+            elapsed = time.perf_counter() - start_time
+            record_ai_call(
+                AiCallStats(
+                    model=self.config.model,
+                    elapsed_seconds=elapsed,
+                    prompt_tokens=prompt_tokens,
+                    completion_tokens=0,
+                    success=False,
+                    error=str(exc),
+                )
+            )
             logger.warning("Gemini planning request failed: %s", exc)
             return PlanningResponse(
                 errors=[
@@ -82,6 +98,18 @@ class GeminiPlannerClient:
                 plan=None,
                 op_yaml="",
             )
+        elapsed = time.perf_counter() - start_time
+        completion_tokens = _count_tokens(self.config.model, text=result.model_dump_json())
+        record_ai_call(
+            AiCallStats(
+                model=self.config.model,
+                elapsed_seconds=elapsed,
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
+                success=not bool(result.errors) and result.plan is not None,
+                error="; ".join(error.message for error in result.errors) or None,
+            )
+        )
 
         if result.errors:
             return PlanningResponse(
@@ -116,17 +144,21 @@ class GeminiPlannerClient:
 
 
 def _planner_prompt(request: PlanningRequest) -> str:
-    return "\n".join(
+    prompt = "\n".join(
         [
             "Generate a complete op.yaml plan for a 2.5D CNC router job.",
             "Honor all system planning advice and user planner advice.",
             "Use the supplied Pydantic response schema exactly.",
             "If required information is missing or unsafe, return errors and leave plan null.",
             "The plan must match the op.yaml schema.",
-            "Do not invent source DXF entities. If you add screws, tabs, or clamps, list them under generated_entities and reference those ids from operations.",
-            "Use operation_groups for fixtures, internal_pockets, internal_holes, contours, and finish_contours when applicable.",
-            "For through cuts, depth should be stock thickness plus cut_deeper_than_stock.",
-            "For screw workholding, place screw holes in scrap areas when a stock frame and part geometry are present.",
+            "Hard planning rules:",
+            "- Do not create operations for frame or ignored entities.",
+            "- Use through-cut depth = stock_thickness + cut_deeper_than_stock.",
+            "- Each operation references exactly one entity.",
+            "- Do not create separate finish operations. Configure roughing and finishing inside the same operation.",
+            "- If USER_PLANNING_INPUTS_YAML.finishing_allowance is greater than zero, every outside contour for a part entity needs one contour operation with roughing.side_allowance set to that value and finishing.enabled true.",
+            "- Put outside contour operations in operation group contours.",
+            "- Contour tabs belong only on contour operations, not pockets, drills, or helical drills.",
             "",
             "GEOM_YAML:",
             _dump_yaml(request.geometry.model_dump(mode="json", exclude_none=True)),
@@ -144,6 +176,7 @@ def _planner_prompt(request: PlanningRequest) -> str:
             _dump_yaml(request.inputs.model_dump(mode="json", exclude_none=True)),
         ]
     )
+    return prompt
 
 
 def _geometry_with_generated_entities(request: PlanningRequest, plan: dict) -> dict:
@@ -156,3 +189,15 @@ def _geometry_with_generated_entities(request: PlanningRequest, plan: dict) -> d
 
 def _dump_yaml(data: dict) -> str:
     return dump_operation_yaml(data)
+
+
+def _count_tokens(model: str, text: str | None = None, messages: list | None = None) -> int:
+    try:
+        return int(litellm.token_counter(model=model, text=text, messages=messages))
+    except Exception:
+        logger.debug("LiteLLM token counting failed", exc_info=True)
+        if text is not None:
+            return max(len(text) // 4, 1)
+        if messages is not None:
+            return max(sum(len(str(message.get("content", ""))) for message in messages) // 4, 1)
+        return 0
