@@ -20,6 +20,7 @@ defaults:
   default_tool: t5           # 1/4" 2-flute upcut
   milling_direction: conventional   # climb | conventional
   finishing_allowance: 0.01
+  cut_deeper_than_stock: 0.01
   tab_settings:
     enabled: true
     width: 0.2

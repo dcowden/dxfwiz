@@ -34,6 +34,8 @@ class Defaults(StrictModel):
     default_tool: str | None = None
     milling_direction: Literal["climb", "conventional"]
     finishing_allowance: float = Field(ge=0)
+    cut_deeper_than_stock: float = Field(default=0.0, ge=0)
+    screw_spacing: float | None = Field(default=None, gt=0)
     tab_settings: TabSettings
 
 

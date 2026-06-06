@@ -6,7 +6,10 @@ import ezdxf
 import pytest
 
 from dxfwiz.dxf import CleanDxfConfig, clean_dxf, write_geometry_yaml
-from dxfwiz.schemas import GeometryFile, MachineFile
+from dxfwiz.planning import PlanningRequest, generate_operation_plan, load_system_planner_advice
+from dxfwiz.planning.service import PlanningResponse
+from dxfwiz.schemas import GeometryFile, MachineFile, PlannerFile
+from dxfwiz.schemas.job import JobFile
 from dxfwiz.svg import render_geometry_svg
 from dxfwiz.yaml_io import load_yaml_file
 
@@ -22,9 +25,12 @@ class DxfCase:
     output_dir: Path
     source_path: Path
     machine_path: Path
+    planner_path: Path
+    operation_assertions_path: Path
     fixed_path: Path
     geom_path: Path
     svg_path: Path
+    op_path: Path
 
 
 def real_dxf_cases() -> list[DxfCase]:
@@ -40,6 +46,8 @@ def real_dxf_cases() -> list[DxfCase]:
         assert len(dxf_paths) == 1, f"Expected one DXF in {input_dir}"
         source_path = dxf_paths[0]
         machine_path = input_dir / "machine.yaml"
+        planner_path = input_dir / "planner.yaml"
+        operation_assertions_path = input_dir / "operation_assertions.yaml"
         output_dir = OUTPUT_DIR / input_dir.name
         cases.append(
             DxfCase(
@@ -48,9 +56,12 @@ def real_dxf_cases() -> list[DxfCase]:
                 output_dir=output_dir,
                 source_path=source_path,
                 machine_path=machine_path,
+                planner_path=planner_path,
+                operation_assertions_path=operation_assertions_path,
                 fixed_path=output_dir / f"{source_path.stem}_fixed.dxf",
                 geom_path=output_dir / f"{source_path.stem}_geom.yaml",
                 svg_path=output_dir / f"{source_path.stem}_geometry.svg",
+                op_path=output_dir / f"{source_path.stem}_op.yaml",
             )
         )
     return cases
@@ -116,6 +127,74 @@ def test_real_dxf_geometry_svg_is_written(case):
     assert "shape-circle" in svg
     if case.name != "intake_frontv2":
         assert "role-frame" in svg
+
+
+@pytest.mark.parametrize("case", real_dxf_cases(), ids=lambda case: case.name)
+def test_real_dxf_operation_plan_outputs_op_yaml(case):
+    ensure_case_outputs(case)
+    machine = MachineFile.model_validate(load_yaml_file(case.machine_path))
+    planner = PlannerFile.model_validate(load_yaml_file(case.planner_path))
+    geometry = GeometryFile.model_validate(load_yaml_file(case.geom_path))
+    assertions = load_yaml_file(case.operation_assertions_path)
+
+    response = generate_operation_plan(
+        _planning_request(case, geometry, machine, planner),
+        client=FakePlannerClient(),
+    )
+
+    assert response.errors == []
+    assert response.plan is not None
+    assert response.geometry is not None
+    case.op_path.write_text(response.op_yaml, encoding="utf-8")
+    job = JobFile.model_validate(response.plan)
+
+    operations = job.model_dump(mode="json", exclude_none=True)["operations"]
+    generated_entities = job.model_dump(mode="json", exclude_none=True)["generated_entities"]
+    generated_screw_holes = [
+        entity for entity in generated_entities if entity["role"] == "screw_hole"
+    ]
+    generated_clamps = [
+        entity for entity in generated_entities if entity["role"] == "clamp"
+    ]
+    rough_contours = [
+        operation
+        for operation in operations
+        if operation["type"] == "contour" and operation.get("tabs", {}).get("enabled")
+    ]
+    finishing_passes = [
+        operation
+        for operation in operations
+        if operation["type"] == "contour"
+        and operation.get("finishing_pass", {}).get("enabled")
+    ]
+
+    assert geometry.summary.entity_count == assertions["total_entities"]
+    assert sum(1 for operation in operations if operation["type"] == "drill") == assertions["drills"]
+    assert sum(1 for operation in operations if operation["type"] == "helical_drill") == assertions["helical_drills"]
+    assert len(generated_screw_holes) == assertions["generated_screw_holes"]["count"]
+    assert len(generated_clamps) == assertions["generated_clamps"]["count"]
+    assert len(rough_contours) == assertions["rough_contours"]
+    assert len(finishing_passes) == assertions["finishing_passes"]
+    if planner.defaults.finishing_allowance:
+        assert len(rough_contours) == len(finishing_passes)
+    assert case.op_path.exists()
+
+    for actual, expected in zip(
+        generated_screw_holes,
+        assertions["generated_screw_holes"]["locations"],
+        strict=True,
+    ):
+        assert round(actual["center"]["x"]) == expected["x"]
+        assert round(actual["center"]["y"]) == expected["y"]
+        assert _point_is_in_scrap_area(actual["center"], geometry)
+
+    for actual, expected in zip(
+        generated_clamps,
+        assertions["generated_clamps"]["positions"],
+        strict=True,
+    ):
+        assert actual["center"]["x"] == pytest.approx(expected["x"], abs=1e-6)
+        assert actual["center"]["y"] == pytest.approx(expected["y"], abs=1e-6)
 
 
 def test_real_dxf_cleaning_summary_file_is_written():
@@ -298,6 +377,93 @@ def _clean_config() -> CleanDxfConfig:
         gap_tolerance=0.005,
         duplicate_tolerance=0.0005,
         min_segment_length=0.001,
+    )
+
+
+def _planning_request(
+    case: DxfCase,
+    geometry: GeometryFile,
+    machine: MachineFile,
+    planner: PlannerFile,
+) -> PlanningRequest:
+    stock = planner.defaults.stock
+    assert stock is not None
+    return PlanningRequest.model_validate(
+        {
+            "geometry": geometry.model_dump(mode="json"),
+            "machine": machine.model_dump(mode="json"),
+            "system_advice": load_system_planner_advice().model_dump(mode="json"),
+            "user_advice": planner.operation_advice.model_dump(mode="json"),
+            "inputs": {
+                "stock_xy": _stock_size_from_geometry(geometry),
+                "stock_units": geometry.units.length,
+                "stock_thickness": stock.thickness,
+                "stock_material": stock.material,
+                "z_zero_position": stock.z_zero,
+                "coordinate_system": planner.defaults.coordinate_system,
+                "workholding_method": planner.defaults.workholding,
+                "tools": planner.defaults.default_tool,
+                "cut_deeper_than_stock": planner.defaults.cut_deeper_than_stock,
+                "finishing_allowance": planner.defaults.finishing_allowance,
+                "screw_spacing": planner.defaults.screw_spacing,
+            },
+        }
+    )
+
+
+class FakePlannerClient:
+    def generate(self, request: PlanningRequest) -> PlanningResponse:
+        from dxfwiz.planning.service import _build_plan, _dump_yaml, _geometry_with_generated_entities
+
+        plan = _build_plan(request, [])
+        job = JobFile.model_validate(plan)
+        plan_data = job.model_dump(mode="json", exclude_none=True)
+        return PlanningResponse(
+            errors=[],
+            warnings=[],
+            geometry=_geometry_with_generated_entities(request.geometry, plan_data),
+            plan=plan_data,
+            op_yaml=_dump_yaml(plan_data),
+        )
+
+
+def _stock_size_from_geometry(geometry: GeometryFile) -> str:
+    entities = {entity.id: entity for entity in geometry.entities}
+    frame = next((node for node in geometry.entity_map if node.role == "frame"), None)
+    if frame is not None:
+        box = entities[frame.entity].bounding_box
+        assert box is not None
+        width = box.max.x - box.min.x
+        height = box.max.y - box.min.y
+        return f"{width:.3f} x {height:.3f} {geometry.units.length} frame"
+    box = geometry.summary.bounding_box
+    width = box.max.x - box.min.x
+    height = box.max.y - box.min.y
+    return f"{width:.3f} x {height:.3f} {geometry.units.length} extents"
+
+
+def _point_is_in_scrap_area(point: dict[str, float], geometry: GeometryFile) -> bool:
+    entities = {entity.id: entity for entity in geometry.entities}
+    frame = next((node for node in geometry.entity_map if node.role == "frame"), None)
+    if frame is None:
+        return True
+    frame_box = entities[frame.entity].bounding_box
+    assert frame_box is not None
+    if not _box_contains_point(frame_box, point):
+        return False
+    for part in frame.children:
+        if part.role != "part":
+            continue
+        part_box = entities[part.entity].bounding_box
+        if part_box is not None and _box_contains_point(part_box, point):
+            return False
+    return True
+
+
+def _box_contains_point(box, point: dict[str, float]) -> bool:
+    return (
+        box.min.x <= point["x"] <= box.max.x
+        and box.min.y <= point["y"] <= box.max.y
     )
 
 

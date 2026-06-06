@@ -24,6 +24,7 @@ class Summary(StrictModel):
     closed_count: int = Field(ge=0)
     open_count: int = Field(ge=0)
     ignored_count: int = Field(default=0, ge=0)
+    generated_count: int = Field(default=0, ge=0)
     bounding_box: Bounds2D
 
 
@@ -42,6 +43,17 @@ class GeometryEntity(StrictModel):
     diameter: float | None = Field(default=None, gt=0)
     area: float | None = Field(default=None, ge=0)
     perimeter: float | None = Field(default=None, ge=0)
+
+
+class GeneratedGeometryEntity(StrictModel):
+    id: str
+    role: Literal["screw_hole", "tab", "clamp"]
+    shape: Literal["circle", "rectangle"]
+    center: Point2D | None = None
+    diameter: float | None = Field(default=None, gt=0)
+    lower_left: Point2D | None = None
+    upper_right: Point2D | None = None
+    source: Literal["planner"] = "planner"
 
 
 class ContainmentNode(StrictModel):
@@ -65,4 +77,5 @@ class GeometryFile(StrictModel):
     source: SourceFiles
     summary: Summary
     entity_map: list[ContainmentNode]
+    generated_entities: list[GeneratedGeometryEntity] = Field(default_factory=list)
     entities: list[GeometryEntity]

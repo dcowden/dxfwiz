@@ -260,3 +260,50 @@ Found non-unique entity handle #107, data validation is required.
 We should move to another screen -- the one labelled 'toolpaths'.  
 on this screen we should repeat the geometry on the right, but using only about 2/3 of the screen. on the right, we should have the yaml from the operation plan.  eventually we'll change the display here to show the operations, but for now we're just repeating the geometry.  
 also on this new screen you can stub out the piecres for the next step-- a post processor selection ( right now the only choice is uccnc, but use a drop down box for later).  and an action button that says generate toolpaths. and below that a disabled button for download gcode/bundle. but disabled ( it will get enabled when toolpaths are generated. 
+
+
+ the code is not calling any ai calls. the current implementation has the code hand-written, but of course this means it wont honor any of the planning ai elements or instructions.  this is missing the point.  re-write the code to use an api call to generate the operation plan.  this should be the result of giving geom.yaml, system_planner_advice.yaml, machine.yaml, and planner.yaml to an ai, and requesting the op.yaml. 
+
+introduce for now a config.yaml that has the api keys i need.i want to use gemini.  what ai model is good enough for this? 
+
+use litellm and instructor for this, since we're using 
+
+
+ok i'm going to be working on a plane in a bit, so i think we may need to work on cnc post processing.  to parepare for that, make a doc folder in the project, and then download these items for local use:
+  (1) the source code for kiri:moto: this is a key source of code generation
+  (2) the source code for f360 uccnc post processor ( javascript), cps extension i think.
+  (3) the source code for any other uccnc post processors you can find
+  (4) any other references for uccnc we may need. 
+
+also, lets think about how to visualize operation plans in the gui. users need to see what the plan is visually.  the key thing is to connect each operation to the entities.  so, we'll start by displaying the entities same as from the prior step-- with the generated entities.  then, lets have a panel that shows the operations as cards, in a list. the card should show the operation details, but when its selectect, it should highlight the associated entity. the cards should be grouped by operation group, so sleecting the group highlighs all of the entities associated with entities in that group. 
+
+finally, wire up the code to use the local operation planner so that we can make progress on this development, because my current network is blocking api calls. its a good idea to be able to use local or ai planners, so lets make sure that both are available, and then set up a config.yaml setting about whether to use the local planner or the ai planner.  for now set up to use the local planner. 
+
+
+ok the latest changes broke all of the menu buttons. zoom extents, zoom in, zoom out, rotate buttons, and entity/dimension fiters no longer do anyhting--and there are no errors in the console either the mouse scroll wheel doesn't work either. 
+
+clicking on operations or groups does not highlight the related entities correctly. it should highlight the related entities, honoring the entity and dimension filters ( IE, start with whatever items are visible after the user has elected entities and dimension filters as they wish, and THEN also filter by the necessary entity ids for the operation or operation group
+
+the separator beween the right and left areas should be movablbe ( left to right) but it is not. 
+
+decimals in the op.yaml have too much precision-- we should use two significant digits after the decimal for mm units, and three for inche-- trim the rest. 
+
+clicking on the operation cards should show the complete yaml details for the item in hover ( xin the upper right corner to dismiss). use yaml format for now. 
+
+add a planner warning if the parts are too close together in the file
+
+for the operation cards, theres not muchvalue showing opid -- type ( eample, op58 -- helical drill). instead if showing ID + type, show ID + description: op60 - Rough outer contour for part e4: tabs 4.  then you can drop the third line, and each op is then 2 lines. 
+
+make a first attempt at building a tool path generator. the toolpath generator should build toolpaths in the order of the operations.  the planner has done the hard work, we know already a list of operations we need.  Break this up into separate functions/steps:
+
+(1) build the beginning of the file, including G90/G91, coordinate system selection ( G54/G55).
+(2) build code for each op. make sure to go to safe_z between ops.   for now, lets skip pockets, and work on 
+    (2a) contours ( in, outside, and on)
+    (2b) holes ( peck drill )
+    (2c) helical drills
+
+these should be a really good start.  use the refernce implementations kiri:moto and uccnc posts fro fusion360 as guides. 
+
+its important in this work that we realize that we'll eventually have TONS of posts. so we want to to divide into two parts: the tool paths, and then the actual post dialect.  i'm not sure where the right boundary isn't clear to me, but we want to strictly separate the code into the core: stuff that applies to any post processor, and the post. design the code accordingly. 
+
+

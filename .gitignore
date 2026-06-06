@@ -7,3 +7,4 @@ dist/
 build/
 tests/output/
 workspace/
+config.yaml

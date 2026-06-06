@@ -1,0 +1,1067 @@
+schema_version: '1.0'
+units:
+  length: in
+  source: guessed
+  confidence: 0.67
+  coordinate_scale: 0.03937008
+  evidence:
+  - DXF $INSUNITS is missing or unitless
+  - raw DXF coordinates look like millimeters for an inch design
+  - in interpretation gives plausible 25.7 in max extent
+  - 50 circular holes match common in sizes
+  - 50 raw circular holes match common inch sizes after 25.4 scaling
+  - inch_score=9.00, mm_score=7.50
+source:
+  original_file: 2xintakev3_and_2xkickerv1.dxf
+  cleaned_file: fixed.dxf
+  format: dxf
+summary:
+  entity_count: 59
+  closed_count: 59
+  open_count: 0
+  ignored_count: 0
+  bounding_box:
+    min:
+      x: 27.5147468503937
+      y: 19.627906692913385
+    max:
+      x: 53.25003149606299
+      y: 40.148409448818896
+entity_map:
+- entity: e9
+  role: frame
+  children:
+  - entity: e1
+    role: part
+    children:
+    - {entity: e10, role: cutout}
+    - {entity: e11, role: cutout}
+    - {entity: e12, role: cutout}
+    - {entity: e13, role: cutout}
+    - {entity: e14, role: cutout}
+  - entity: e8
+    role: part
+    children:
+    - {entity: e55, role: cutout}
+    - {entity: e56, role: cutout}
+    - {entity: e57, role: cutout}
+    - {entity: e58, role: cutout}
+    - {entity: e59, role: cutout}
+  - entity: e5
+    role: part
+    children:
+    - {entity: e44, role: cutout}
+    - {entity: e49, role: cutout}
+    - {entity: e7, role: cutout}
+    - {entity: e6, role: cutout}
+    - {entity: e36, role: cutout}
+    - {entity: e37, role: cutout}
+    - {entity: e38, role: cutout}
+    - {entity: e39, role: cutout}
+    - {entity: e40, role: cutout}
+    - {entity: e45, role: cutout}
+    - {entity: e50, role: cutout}
+    - {entity: e51, role: cutout}
+    - {entity: e52, role: cutout}
+    - {entity: e53, role: cutout}
+    - {entity: e54, role: cutout}
+    - {entity: e35, role: cutout}
+    - {entity: e41, role: cutout}
+    - {entity: e42, role: cutout}
+    - {entity: e43, role: cutout}
+    - {entity: e46, role: cutout}
+    - {entity: e47, role: cutout}
+    - {entity: e48, role: cutout}
+  - entity: e2
+    role: part
+    children:
+    - {entity: e24, role: cutout}
+    - {entity: e29, role: cutout}
+    - {entity: e4, role: cutout}
+    - {entity: e3, role: cutout}
+    - {entity: e15, role: cutout}
+    - {entity: e16, role: cutout}
+    - {entity: e17, role: cutout}
+    - {entity: e18, role: cutout}
+    - {entity: e19, role: cutout}
+    - {entity: e20, role: cutout}
+    - {entity: e25, role: cutout}
+    - {entity: e30, role: cutout}
+    - {entity: e31, role: cutout}
+    - {entity: e32, role: cutout}
+    - {entity: e33, role: cutout}
+    - {entity: e34, role: cutout}
+    - {entity: e22, role: cutout}
+    - {entity: e27, role: cutout}
+    - {entity: e28, role: cutout}
+    - {entity: e21, role: cutout}
+    - {entity: e23, role: cutout}
+    - {entity: e26, role: cutout}
+entities:
+- id: e1
+  type: closed_loop
+  shape: polyline_with_arcs
+  source_refs:
+  - kind: dxf_handle
+    value: 2F
+  bounding_box:
+    min:
+      x: 28.46535275590551
+      y: 30.423340157480315
+    max:
+      x: 37.833352755905516
+      y: 39.42333858267717
+- id: e2
+  type: closed_loop
+  shape: polyline_with_arcs
+  source_refs:
+  - kind: dxf_handle
+    value: '30'
+  bounding_box:
+    min:
+      x: 39.281288188976376
+      y: 27.477889370078742
+    max:
+      x: 52.79875196850393
+      y: 38.85038740157481
+- id: e3
+  type: closed_loop
+  shape: polyline_with_arcs
+  source_refs:
+  - kind: dxf_handle
+    value: '31'
+  bounding_box:
+    min:
+      x: 46.377633858267714
+      y: 27.97788976377953
+    max:
+      x: 47.02715354330709
+      y: 28.60288976377953
+- id: e4
+  type: closed_loop
+  shape: polyline_with_arcs
+  source_refs:
+  - kind: dxf_handle
+    value: '32'
+  bounding_box:
+    min:
+      x: 39.92427165354331
+      y: 33.24008858267717
+    max:
+      x: 40.57379133858267
+      y: 33.86508976377953
+- id: e5
+  type: closed_loop
+  shape: polyline_with_arcs
+  source_refs:
+  - kind: dxf_handle
+    value: '33'
+  bounding_box:
+    min:
+      x: 37.95517086614173
+      y: 20.722769291338583
+    max:
+      x: 51.47263385826771
+      y: 32.095267322834644
+- id: e6
+  type: closed_loop
+  shape: polyline_with_arcs
+  source_refs:
+  - kind: dxf_handle
+    value: '34'
+  bounding_box:
+    min:
+      x: 43.726767716535434
+      y: 30.970266929133857
+    max:
+      x: 44.3762874015748
+      y: 31.595266929133857
+- id: e7
+  type: closed_loop
+  shape: polyline_with_arcs
+  source_refs:
+  - kind: dxf_handle
+    value: '35'
+  bounding_box:
+    min:
+      x: 50.180133858267716
+      y: 25.70806771653543
+    max:
+      x: 50.82965354330709
+      y: 26.33306850393701
+- id: e8
+  type: closed_loop
+  shape: polyline_with_arcs
+  source_refs:
+  - kind: dxf_handle
+    value: '36'
+  bounding_box:
+    min:
+      x: 28.215807086614173
+      y: 20.10710787401575
+    max:
+      x: 37.58380787401575
+      y: 29.107106692913387
+- id: e9
+  type: closed_loop
+  shape: rectangle
+  source_refs:
+  - kind: dxf_handle
+    value: '37'
+  bounding_box:
+    min:
+      x: 27.5147468503937
+      y: 19.627906692913385
+    max:
+      x: 53.25003149606299
+      y: 40.148409448818896
+- id: e10
+  type: closed_loop
+  shape: circle
+  source_refs:
+  - kind: dxf_handle
+    value: '38'
+  bounding_box:
+    min:
+      x: 35.14261933070866
+      y: 30.82107090551181
+    max:
+      x: 36.267619251968505
+      y: 31.946070826771653
+  center:
+    x: 35.70511929133858
+    y: 31.38357086614173
+  diameter: 1.1249999212598425
+- id: e11
+  type: closed_loop
+  shape: circle
+  source_refs:
+  - kind: dxf_handle
+    value: '39'
+  bounding_box:
+    min:
+      x: 35.14261933070866
+      y: 37.2187087007874
+    max:
+      x: 36.267619251968505
+      y: 38.343708622047245
+  center:
+    x: 35.70511929133858
+    y: 37.781208661417324
+  diameter: 1.1249999212598425
+- id: e12
+  type: closed_loop
+  shape: circle
+  source_refs:
+  - kind: dxf_handle
+    value: 3A
+  bounding_box:
+    min:
+      x: 31.94529059055118
+      y: 36.362448070866144
+    max:
+      x: 33.070290511811024
+      y: 37.487447992125986
+  center:
+    x: 32.5077905511811
+    y: 36.924948031496065
+  diameter: 1.1249999212598425
+- id: e13
+  type: closed_loop
+  shape: circle
+  source_refs:
+  - kind: dxf_handle
+    value: 3B
+  bounding_box:
+    min:
+      x: 28.74498153543307
+      y: 30.82107090551181
+    max:
+      x: 29.869981456692916
+      y: 31.946070826771653
+  center:
+    x: 29.30748149606299
+    y: 31.38357086614173
+  diameter: 1.1249999212598425
+- id: e14
+  type: closed_loop
+  shape: circle
+  source_refs:
+  - kind: dxf_handle
+    value: 3C
+  bounding_box:
+    min:
+      x: 29.60124492125984
+      y: 34.01840003937008
+    max:
+      x: 30.726244842519687
+      y: 35.14339996062992
+  center:
+    x: 30.163744881889766
+    y: 34.5809
+  diameter: 1.1249999212598425
+- id: e15
+  type: closed_loop
+  shape: circle
+  source_refs:
+  - kind: dxf_handle
+    value: 3D
+  bounding_box:
+    min:
+      x: 50.631759842519685
+      y: 37.43221850393701
+    max:
+      x: 50.832759842519685
+      y: 37.63321850393701
+  center:
+    x: 50.73225984251969
+    y: 37.532718503937005
+  diameter: 0.201
+- id: e16
+  type: closed_loop
+  shape: circle
+  source_refs:
+  - kind: dxf_handle
+    value: 3E
+  bounding_box:
+    min:
+      x: 48.54545275590551
+      y: 37.628910629921265
+    max:
+      x: 48.74645275590551
+      y: 37.82991062992126
+  center:
+    x: 48.645952755905505
+    y: 37.72941062992126
+  diameter: 0.201
+- id: e17
+  type: closed_loop
+  shape: circle
+  source_refs:
+  - kind: dxf_handle
+    value: 3F
+  bounding_box:
+    min:
+      x: 47.54545669291339
+      y: 36.6289094488189
+    max:
+      x: 47.746456692913384
+      y: 36.829909448818896
+  center:
+    x: 47.64595669291339
+    y: 36.7294094488189
+  diameter: 0.201
+- id: e18
+  type: closed_loop
+  shape: circle
+  source_refs:
+  - kind: dxf_handle
+    value: '40'
+  bounding_box:
+    min:
+      x: 48.54545275590551
+      y: 35.62890866141732
+    max:
+      x: 48.74645275590551
+      y: 35.82990866141732
+  center:
+    x: 48.645952755905505
+    y: 35.729408661417324
+  diameter: 0.201
+- id: e19
+  type: closed_loop
+  shape: circle
+  source_refs:
+  - kind: dxf_handle
+    value: '41'
+  bounding_box:
+    min:
+      x: 50.09663779527559
+      y: 34.41079566929134
+    max:
+      x: 50.29763779527559
+      y: 34.61179566929134
+  center:
+    x: 50.19713779527559
+    y: 34.511295669291336
+  diameter: 0.201
+- id: e20
+  type: closed_loop
+  shape: circle
+  source_refs:
+  - kind: dxf_handle
+    value: '42'
+  bounding_box:
+    min:
+      x: 49.54545669291338
+      y: 36.6289094488189
+    max:
+      x: 49.746456692913384
+      y: 36.829909448818896
+  center:
+    x: 49.64595669291339
+    y: 36.7294094488189
+  diameter: 0.201
+- id: e21
+  type: closed_loop
+  shape: circle
+  source_refs:
+  - kind: dxf_handle
+    value: '43'
+  bounding_box:
+    min:
+      x: 39.67903149606299
+      y: 34.20415590551181
+    max:
+      x: 39.879031496062986
+      y: 34.40415590551181
+  center:
+    x: 39.77903149606299
+    y: 34.30415590551181
+  diameter: 0.2
+- id: e22
+  type: closed_loop
+  shape: circle
+  source_refs:
+  - kind: dxf_handle
+    value: '44'
+  bounding_box:
+    min:
+      x: 40.619031496062995
+      y: 32.57602637795276
+    max:
+      x: 40.81903149606299
+      y: 32.77602637795275
+  center:
+    x: 40.719031496062996
+    y: 32.67602637795276
+  diameter: 0.2
+- id: e23
+  type: closed_loop
+  shape: circle
+  source_refs:
+  - kind: dxf_handle
+    value: '45'
+  bounding_box:
+    min:
+      x: 39.209029133858266
+      y: 33.39009133858268
+    max:
+      x: 39.40902913385827
+      y: 33.590091338582674
+  center:
+    x: 39.30902913385827
+    y: 33.49009133858268
+  diameter: 0.2
+- id: e24
+  type: closed_loop
+  shape: circle
+  source_refs:
+  - kind: dxf_handle
+    value: '46'
+  bounding_box:
+    min:
+      x: 48.08345279527558
+      y: 36.16690948818898
+    max:
+      x: 49.20845271653543
+      y: 37.29190940944882
+  center:
+    x: 48.645952755905505
+    y: 36.7294094488189
+  diameter: 1.1249999212598425
+- id: e25
+  type: closed_loop
+  shape: circle
+  source_refs:
+  - kind: dxf_handle
+    value: '47'
+  bounding_box:
+    min:
+      x: 48.796917322834645
+      y: 38.872259055118114
+    max:
+      x: 48.997917322834645
+      y: 39.07325905511811
+  center:
+    x: 48.89741732283465
+    y: 38.97275905511811
+  diameter: 0.201
+- id: e26
+  type: closed_loop
+  shape: circle
+  source_refs:
+  - kind: dxf_handle
+    value: '48'
+  bounding_box:
+    min:
+      x: 39.67903149606299
+      y: 32.57602637795276
+    max:
+      x: 39.879031496062986
+      y: 32.77602637795275
+  center:
+    x: 39.77903149606299
+    y: 32.67602637795276
+  diameter: 0.2
+- id: e27
+  type: closed_loop
+  shape: circle
+  source_refs:
+  - kind: dxf_handle
+    value: '49'
+  bounding_box:
+    min:
+      x: 41.08903149606299
+      y: 33.39009133858268
+    max:
+      x: 41.28903149606299
+      y: 33.590091338582674
+  center:
+    x: 41.18903149606299
+    y: 33.49009133858268
+  diameter: 0.2
+- id: e28
+  type: closed_loop
+  shape: circle
+  source_refs:
+  - kind: dxf_handle
+    value: 4A
+  bounding_box:
+    min:
+      x: 40.619031496062995
+      y: 34.20415590551181
+    max:
+      x: 40.81903149606299
+      y: 34.40415590551181
+  center:
+    x: 40.719031496062996
+    y: 34.30415590551181
+  diameter: 0.2
+- id: e29
+  type: closed_loop
+  shape: circle
+  source_refs:
+  - kind: dxf_handle
+    value: 4B
+  bounding_box:
+    min:
+      x: 51.185815000000005
+      y: 31.730682322834646
+    max:
+      x: 52.31081492125985
+      y: 32.85568224409449
+  center:
+    x: 51.748314960629926
+    y: 32.29318228346457
+  diameter: 1.1249999212598425
+- id: e30
+  type: closed_loop
+  shape: circle
+  source_refs:
+  - kind: dxf_handle
+    value: 4C
+  bounding_box:
+    min:
+      x: 49.25255905511811
+      y: 35.92180275590552
+    max:
+      x: 49.45355905511811
+      y: 36.12280275590551
+  center:
+    x: 49.35305905511811
+    y: 36.022302755905514
+  diameter: 0.201
+- id: e31
+  type: closed_loop
+  shape: circle
+  source_refs:
+  - kind: dxf_handle
+    value: 4D
+  bounding_box:
+    min:
+      x: 47.83834645669292
+      y: 35.92180275590552
+    max:
+      x: 48.03934645669291
+      y: 36.12280275590551
+  center:
+    x: 47.938846456692914
+    y: 36.022302755905514
+  diameter: 0.201
+- id: e32
+  type: closed_loop
+  shape: circle
+  source_refs:
+  - kind: dxf_handle
+    value: 4E
+  bounding_box:
+    min:
+      x: 47.83834645669292
+      y: 37.33601614173229
+    max:
+      x: 48.03934645669291
+      y: 37.53701614173228
+  center:
+    x: 47.938846456692914
+    y: 37.436516141732284
+  diameter: 0.201
+- id: e33
+  type: closed_loop
+  shape: circle
+  source_refs:
+  - kind: dxf_handle
+    value: 4F
+  bounding_box:
+    min:
+      x: 49.25255905511811
+      y: 37.33601614173229
+    max:
+      x: 49.45355905511811
+      y: 37.53701614173228
+  center:
+    x: 49.35305905511811
+    y: 37.436516141732284
+  diameter: 0.201
+- id: e34
+  type: closed_loop
+  shape: circle
+  source_refs:
+  - kind: dxf_handle
+    value: '50'
+  bounding_box:
+    min:
+      x: 44.987228346456696
+      y: 32.807517716535436
+    max:
+      x: 45.18822834645669
+      y: 33.00851771653543
+  center:
+    x: 45.08772834645669
+    y: 32.90801771653543
+  diameter: 0.201
+- id: e35
+  type: closed_loop
+  shape: circle
+  source_refs:
+  - kind: dxf_handle
+    value: '51'
+  bounding_box:
+    min:
+      x: 39.92116535433071
+      y: 21.93993661417323
+    max:
+      x: 40.122165354330704
+      y: 22.140936614173228
+  center:
+    x: 40.02166535433071
+    y: 22.040436614173228
+  diameter: 0.201
+- id: e36
+  type: closed_loop
+  shape: circle
+  source_refs:
+  - kind: dxf_handle
+    value: '52'
+  bounding_box:
+    min:
+      x: 42.00747244094488
+      y: 21.74324724409449
+    max:
+      x: 42.20847244094488
+      y: 21.944247244094488
+  center:
+    x: 42.107972440944884
+    y: 21.843747244094487
+  diameter: 0.201
+- id: e37
+  type: closed_loop
+  shape: circle
+  source_refs:
+  - kind: dxf_handle
+    value: '53'
+  bounding_box:
+    min:
+      x: 43.007468503937005
+      y: 22.743248031496062
+    max:
+      x: 43.208468503937
+      y: 22.94424803149606
+  center:
+    x: 43.107968503937
+    y: 22.84374803149606
+  diameter: 0.201
+- id: e38
+  type: closed_loop
+  shape: circle
+  source_refs:
+  - kind: dxf_handle
+    value: '54'
+  bounding_box:
+    min:
+      x: 42.00747244094488
+      y: 23.743249212598425
+    max:
+      x: 42.20847244094488
+      y: 23.94424921259842
+  center:
+    x: 42.107972440944884
+    y: 23.843749212598425
+  diameter: 0.201
+- id: e39
+  type: closed_loop
+  shape: circle
+  source_refs:
+  - kind: dxf_handle
+    value: '55'
+  bounding_box:
+    min:
+      x: 40.45628346456693
+      y: 24.9613594488189
+    max:
+      x: 40.65728346456692
+      y: 25.162359448818897
+  center:
+    x: 40.55678346456693
+    y: 25.061859448818897
+  diameter: 0.201
+- id: e40
+  type: closed_loop
+  shape: circle
+  source_refs:
+  - kind: dxf_handle
+    value: '56'
+  bounding_box:
+    min:
+      x: 41.00747244094488
+      y: 22.743248031496062
+    max:
+      x: 41.208472440944874
+      y: 22.94424803149606
+  center:
+    x: 41.10797244094488
+    y: 22.84374803149606
+  diameter: 0.201
+- id: e41
+  type: closed_loop
+  shape: circle
+  source_refs:
+  - kind: dxf_handle
+    value: '57'
+  bounding_box:
+    min:
+      x: 50.87488976377952
+      y: 25.169003937007876
+    max:
+      x: 51.074889763779524
+      y: 25.369003937007875
+  center:
+    x: 50.97488976377952
+    y: 25.269003937007877
+  diameter: 0.2
+- id: e42
+  type: closed_loop
+  shape: circle
+  source_refs:
+  - kind: dxf_handle
+    value: '58'
+  bounding_box:
+    min:
+      x: 49.93488976377952
+      y: 26.797131102362208
+    max:
+      x: 50.13488976377952
+      y: 26.997131102362204
+  center:
+    x: 50.034889763779525
+    y: 26.897131102362206
+  diameter: 0.2
+- id: e43
+  type: closed_loop
+  shape: circle
+  source_refs:
+  - kind: dxf_handle
+    value: '59'
+  bounding_box:
+    min:
+      x: 51.3448937007874
+      y: 25.983066535433075
+    max:
+      x: 51.5448937007874
+      y: 26.18306653543307
+  center:
+    x: 51.4448937007874
+    y: 26.083066535433073
+  diameter: 0.2
+- id: e44
+  type: closed_loop
+  shape: circle
+  source_refs:
+  - kind: dxf_handle
+    value: 5A
+  bounding_box:
+    min:
+      x: 41.54547248031496
+      y: 22.281248070866138
+    max:
+      x: 42.670472401574806
+      y: 23.406247992125984
+  center:
+    x: 42.107972440944884
+    y: 22.84374803149606
+  diameter: 1.1249999212598425
+- id: e45
+  type: closed_loop
+  shape: circle
+  source_refs:
+  - kind: dxf_handle
+    value: 5B
+  bounding_box:
+    min:
+      x: 41.756007874015744
+      y: 20.499896062992125
+    max:
+      x: 41.957007874015744
+      y: 20.700896062992122
+  center:
+    x: 41.85650787401574
+    y: 20.600396062992125
+  diameter: 0.201
+- id: e46
+  type: closed_loop
+  shape: circle
+  source_refs:
+  - kind: dxf_handle
+    value: 5C
+  bounding_box:
+    min:
+      x: 50.87488976377952
+      y: 26.797131102362208
+    max:
+      x: 51.074889763779524
+      y: 26.997131102362204
+  center:
+    x: 50.97488976377952
+    y: 26.897131102362206
+  diameter: 0.2
+- id: e47
+  type: closed_loop
+  shape: circle
+  source_refs:
+  - kind: dxf_handle
+    value: 5D
+  bounding_box:
+    min:
+      x: 49.46488976377953
+      y: 25.983066535433075
+    max:
+      x: 49.66488976377953
+      y: 26.18306653543307
+  center:
+    x: 49.564889763779526
+    y: 26.083066535433073
+  diameter: 0.2
+- id: e48
+  type: closed_loop
+  shape: circle
+  source_refs:
+  - kind: dxf_handle
+    value: 5E
+  bounding_box:
+    min:
+      x: 49.93488976377952
+      y: 25.169003937007876
+    max:
+      x: 50.13488976377952
+      y: 25.369003937007875
+  center:
+    x: 50.034889763779525
+    y: 25.269003937007877
+  diameter: 0.2
+- id: e49
+  type: closed_loop
+  shape: circle
+  source_refs:
+  - kind: dxf_handle
+    value: 5F
+  bounding_box:
+    min:
+      x: 38.443107519685036
+      y: 26.717473267716535
+    max:
+      x: 39.568107440944885
+      y: 27.84247318897638
+  center:
+    x: 39.00560748031496
+    y: 27.279973228346456
+  diameter: 1.1249999212598425
+- id: e50
+  type: closed_loop
+  shape: circle
+  source_refs:
+  - kind: dxf_handle
+    value: '60'
+  bounding_box:
+    min:
+      x: 41.30036220472441
+      y: 23.450352362204725
+    max:
+      x: 41.5013622047244
+      y: 23.651352362204722
+  center:
+    x: 41.400862204724405
+    y: 23.550852362204722
+  diameter: 0.201
+- id: e51
+  type: closed_loop
+  shape: circle
+  source_refs:
+  - kind: dxf_handle
+    value: '61'
+  bounding_box:
+    min:
+      x: 42.7145748031496
+      y: 23.450352362204725
+    max:
+      x: 42.9155748031496
+      y: 23.651352362204722
+  center:
+    x: 42.81507480314961
+    y: 23.550852362204722
+  diameter: 0.201
+- id: e52
+  type: closed_loop
+  shape: circle
+  source_refs:
+  - kind: dxf_handle
+    value: '62'
+  bounding_box:
+    min:
+      x: 42.7145748031496
+      y: 22.036141338582677
+    max:
+      x: 42.9155748031496
+      y: 22.237141338582674
+  center:
+    x: 42.81507480314961
+    y: 22.136641338582674
+  diameter: 0.201
+- id: e53
+  type: closed_loop
+  shape: circle
+  source_refs:
+  - kind: dxf_handle
+    value: '63'
+  bounding_box:
+    min:
+      x: 41.30036220472441
+      y: 22.036141338582677
+    max:
+      x: 41.5013622047244
+      y: 22.237141338582674
+  center:
+    x: 41.400862204724405
+    y: 22.136641338582674
+  diameter: 0.201
+- id: e54
+  type: closed_loop
+  shape: circle
+  source_refs:
+  - kind: dxf_handle
+    value: '64'
+  bounding_box:
+    min:
+      x: 45.565692913385824
+      y: 26.56464015748032
+    max:
+      x: 45.766692913385825
+      y: 26.765640157480316
+  center:
+    x: 45.66619291338583
+    y: 26.665140157480316
+  diameter: 0.201
+- id: e55
+  type: closed_loop
+  shape: circle
+  source_refs:
+  - kind: dxf_handle
+    value: '65'
+  bounding_box:
+    min:
+      x: 34.89307444881889
+      y: 27.58437405511811
+    max:
+      x: 36.01807437007874
+      y: 28.709373976377954
+  center:
+    x: 35.45557440944882
+    y: 28.146874015748033
+  diameter: 1.1249999212598425
+- id: e56
+  type: closed_loop
+  shape: circle
+  source_refs:
+  - kind: dxf_handle
+    value: '66'
+  bounding_box:
+    min:
+      x: 34.893077204724406
+      y: 21.18673625984252
+    max:
+      x: 36.01807712598425
+      y: 22.311736181102365
+  center:
+    x: 35.45557716535433
+    y: 21.74923622047244
+  diameter: 1.1249999212598425
+- id: e57
+  type: closed_loop
+  shape: circle
+  source_refs:
+  - kind: dxf_handle
+    value: '67'
+  bounding_box:
+    min:
+      x: 31.69574334645669
+      y: 22.04299964566929
+    max:
+      x: 32.82074326771654
+      y: 23.167999566929137
+  center:
+    x: 32.258243307086616
+    y: 22.605499606299215
+  diameter: 1.1249999212598425
+- id: e58
+  type: closed_loop
+  shape: circle
+  source_refs:
+  - kind: dxf_handle
+    value: '68'
+  bounding_box:
+    min:
+      x: 28.495436653543305
+      y: 27.58437405511811
+    max:
+      x: 29.62043657480315
+      y: 28.709373976377954
+  center:
+    x: 29.05793661417323
+    y: 28.146874015748033
+  diameter: 1.1249999212598425
+- id: e59
+  type: closed_loop
+  shape: circle
+  source_refs:
+  - kind: dxf_handle
+    value: '69'
+  bounding_box:
+    min:
+      x: 29.35170003937008
+      y: 24.38704492125984
+    max:
+      x: 30.476699960629922
+      y: 25.512044842519686
+  center:
+    x: 29.9142
+    y: 24.949544881889764
+  diameter: 1.1249999212598425

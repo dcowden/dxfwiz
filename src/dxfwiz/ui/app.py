@@ -15,9 +15,11 @@ from nicegui import app, ui
 from dxfwiz.api import router as api_router
 from dxfwiz.logging_config import configure_logging
 from dxfwiz.planning import PlanningRequest, PlanningResponse, load_system_planner_advice
-from dxfwiz.schemas import MachineFile, OperationInputsFile, PlannerFile
+from dxfwiz.planning.yaml_format import dump_operation_yaml
+from dxfwiz.schemas import GeometryFile, JobFile, MachineFile, OperationInputsFile, PlannerFile
+from dxfwiz.toolpaths import ToolpathRequest, ToolpathResponse
 from dxfwiz.ui.service import ProjectArtifacts, ProjectService
-from dxfwiz.yaml_io import load_yaml_file
+from dxfwiz.yaml_io import dump_yaml_file, load_yaml_file
 
 
 ROOT_DIR = Path(__file__).resolve().parents[3]
@@ -133,21 +135,82 @@ def main() -> None:
             padding: 16px; display: flex; flex-direction: column; box-shadow: 0 16px 40px rgba(15, 23, 42, 0.08);
           }
           .toolpaths-grid {
-            height: 100%; min-height: 0; display: grid; grid-template-columns: minmax(0, 2fr) minmax(360px, 1fr);
+            height: 100%; min-height: 0; display: grid; grid-template-columns: minmax(0, 1fr) 7px 430px;
           }
+          .toolpaths-grid .display-card { min-width: 0; }
+          .splitter {
+            width: 7px; cursor: col-resize; background: #dbe3ef; border-left: 1px solid #cbd5e1;
+            border-right: 1px solid #cbd5e1;
+          }
+          .splitter:hover, .splitter.dragging { background: #93c5fd; }
           .toolpath-panel {
-            min-height: 0; height: 100%; overflow: auto; border-left: 1px solid #dbe3ef;
+            min-height: 0; height: 100%; min-width: 320px; overflow: auto;
             background: #ffffff; padding: 14px;
           }
+          .issue-list { border: 1px solid #dbe3ef; border-radius: 7px; padding: 10px; margin-top: 10px; background: #f8fafc; }
+          .issue-error { color: #b91c1c; }
+          .issue-warning { color: #92400e; }
           .op-output {
             overflow: auto; white-space: pre; font: 12px Consolas, monospace;
             background: #0f172a; color: #e2e8f0; border-radius: 7px; padding: 10px; margin-top: 10px;
             max-height: calc(100vh - 245px);
           }
+          .operation-groups { display: flex; flex-direction: column; gap: 10px; margin-top: 12px; }
+          .operation-group {
+            border: 1px solid #dbe3ef; border-radius: 7px; background: #f8fafc; padding: 8px;
+          }
+          .operation-group-title {
+            width: 100%; border: 0; background: transparent; color: #0f172a; cursor: pointer;
+            display: flex; align-items: center; justify-content: space-between; font-weight: 750;
+            font-size: 13px; padding: 4px;
+          }
+          .operation-card {
+            width: 100%; margin-top: 6px; border: 1px solid #dbe3ef; border-radius: 7px;
+            background: #ffffff; padding: 8px; cursor: pointer; text-align: left;
+          }
+          .operation-card:hover, .operation-group-title:hover { background: #eff6ff; }
+          .operation-card-title { font-weight: 750; color: #0f172a; font-size: 13px; }
+          .operation-card-meta { color: #475569; font-size: 12px; margin-top: 3px; }
+          .operation-yaml-popover {
+            position: fixed; top: 76px; right: 22px; z-index: 50; width: min(560px, calc(100vw - 44px));
+            max-height: calc(100vh - 112px); border: 1px solid #94a3b8; border-radius: 8px;
+            background: #ffffff; box-shadow: 0 22px 70px rgba(15, 23, 42, 0.22); overflow: hidden;
+          }
+          .operation-yaml-popover header {
+            height: 40px; display: flex; align-items: center; justify-content: space-between;
+            padding: 0 10px 0 14px; border-bottom: 1px solid #dbe3ef; font-weight: 750;
+          }
+          .operation-yaml-popover button {
+            border: 0; background: transparent; cursor: pointer; color: #475569; font-size: 20px;
+          }
+          .operation-yaml-popover pre {
+            margin: 0; padding: 12px; overflow: auto; max-height: calc(100vh - 154px);
+            background: #0f172a; color: #e2e8f0; font: 12px Consolas, monospace;
+          }
+          #dxfwiz-scene .selected-entity .entity-outline,
+          #dxfwiz-scene .selected-entity.workholding-outline,
+          #dxfwiz-scene .selected-entity .workholding-outline {
+            stroke: #ef4444 !important;
+            stroke-width: 4px !important;
+          }
+          #dxfwiz-scene .selected-entity.entity-name-label .entity-name-text,
+          #dxfwiz-scene .selected-entity.workholding-label,
+          #dxfwiz-scene .selected-entity .workholding-label {
+            fill: #ef4444 !important;
+          }
+          #dxfwiz-scene.hide-entity-labels .entity-name-label,
+          #dxfwiz-scene.hide-entity-labels .workholding-label {
+            display: none;
+          }
+          #dxfwiz-scene.hide-dimension-labels .diameter-label,
+          #dxfwiz-scene.hide-dimension-labels .leader-line,
+          #dxfwiz-scene.hide-dimension-labels .callout-bubble {
+            display: none;
+          }
         </style>
         """
     )
-    ui.add_body_html(_viewer_script())
+    ui.add_head_html(_viewer_script())
 
     with ui.element("div").classes("app-shell"):
         with ui.element("div").classes("topbar"):
@@ -208,9 +271,14 @@ def render_project_state(content, state: dict, machine: MachineFile, artifacts: 
     with content:
         with ui.element("div").classes("main-grid"):
             with ui.element("div").classes("display-card"):
-                _render_graphics_area(artifacts)
+                _render_graphics_area(artifacts, state)
             with ui.element("div").classes("planning-panel"):
                 ui.label("Planning").classes("px-4 pt-4 text-lg font-semibold text-slate-900")
+                ui.button(
+                    "Download geom.yaml",
+                    icon="download",
+                    on_click=lambda: ui.download(artifacts.geom_yaml),
+                ).props("flat color=primary dense").classes("mx-4 mt-1")
                 with ui.element("div").classes("planning-scroll"):
                     with ui.expansion("Geometry Summary", icon="analytics", value=True).classes("w-full"):
                         _render_geometry_summary(planning_context)
@@ -256,6 +324,10 @@ def render_project_state(content, state: dict, machine: MachineFile, artifacts: 
                         request = _planning_request(machine, planner, artifacts, state)
                         response = await _post_plan_request(request)
                         state["inputs"]["op_yaml"] = response.op_yaml
+                        _write_project_op_yaml(artifacts, response.op_yaml)
+                        if response.geometry:
+                            state["geometry"] = response.geometry
+                            _write_project_geometry(artifacts, response.geometry)
                         if response.errors:
                             state["inputs"]["op_yaml"] = _issues_yaml(response)
                             ui.notify("Plan has errors to resolve.", type="negative")
@@ -300,17 +372,162 @@ def render_toolpaths_state(content, state: dict) -> None:
     with content:
         with ui.element("div").classes("toolpaths-grid"):
             with ui.element("div").classes("display-card"):
-                _render_graphics_area(artifacts)
+                _render_graphics_area(artifacts, state)
+            ui.element("div").classes("splitter")
             with ui.element("div").classes("toolpath-panel"):
                 ui.label("Toolpaths").classes("text-lg font-semibold text-slate-900")
+                response: PlanningResponse | None = state.get("plan_response")
+                _render_plan_issues(response)
+                ui.button(
+                    "Make adjustments",
+                    icon="arrow_back",
+                    on_click=lambda: _return_to_plan(state),
+                ).props("flat color=primary").classes("w-full mt-3")
                 ui.select(["uccnc"], value="uccnc", label="Post processor").props("outlined dense").classes("w-full mt-3")
-                ui.button("Generate toolpaths", icon="route").props("color=primary unelevated").classes("w-full mt-3")
-                ui.button("Download gcode / bundle", icon="download").props("disable unelevated").classes("w-full mt-2")
+                toolpath_button = ui.button("Generate toolpaths", icon="route").props("color=primary unelevated").classes("w-full mt-3")
+                if response and response.errors:
+                    toolpath_button.disable()
+                async def generate_toolpaths_click() -> None:
+                    if not response or not response.plan:
+                        return
+                    request = ToolpathRequest(
+                        job=JobFile.model_validate(response.plan),
+                        geometry=GeometryFile.model_validate(_geometry_from_state(artifacts, state)),
+                        machine=service.load_machine(),
+                        post="uccnc",
+                        fixed_dxf=artifacts.fixed_dxf.read_text(encoding="utf-8", errors="ignore"),
+                    )
+                    toolpath_response = await _post_toolpath_request(request)
+                    state["toolpath_response"] = toolpath_response
+                    if toolpath_response.errors:
+                        ui.notify("Toolpath generation has errors.", type="negative")
+                    elif toolpath_response.warnings:
+                        ui.notify("Toolpaths generated with warnings.", type="warning")
+                    else:
+                        ui.notify("Toolpaths generated.", type="positive")
+                    if toolpath_response.gcode:
+                        _write_project_gcode(artifacts, toolpath_response.gcode)
+                    render_toolpaths_state(state["content"], state)
+                toolpath_button.on("click", generate_toolpaths_click)
+                ui.button(
+                    "Download op.yaml",
+                    icon="download",
+                    on_click=lambda: ui.download(_op_yaml_path(artifacts)),
+                ).props("flat color=primary").classes("w-full mt-2")
+                gcode_path = _gcode_path(artifacts)
+                gcode_button = ui.button(
+                    "Download gcode",
+                    icon="download",
+                    on_click=lambda: ui.download(gcode_path),
+                ).props("flat color=primary").classes("w-full mt-2")
+                if not gcode_path.exists():
+                    gcode_button.disable()
+                _render_operation_groups(response)
                 ui.label("op.yaml").classes("text-sm font-semibold text-slate-700 mt-4")
                 ui.html(f'<pre class="op-output">{escape(state["inputs"].get("op_yaml", ""))}</pre>')
+                toolpath_response: ToolpathResponse | None = state.get("toolpath_response")
+                if toolpath_response:
+                    _render_toolpath_issues(toolpath_response)
+                    ui.label("gcode").classes("text-sm font-semibold text-slate-700 mt-4")
+                    ui.html(f'<pre class="op-output">{escape(toolpath_response.gcode)}</pre>')
 
 
-def _render_graphics_area(artifacts: ProjectArtifacts) -> None:
+def _render_plan_issues(response: PlanningResponse | None) -> None:
+    errors = response.errors if response else []
+    warnings = response.warnings if response else []
+    with ui.element("div").classes("issue-list"):
+        ui.label("Plan Review").classes("text-sm font-semibold text-slate-800")
+        if not errors and not warnings:
+            ui.label("No warnings or errors.").classes("text-sm text-slate-600")
+        for error in errors:
+            ui.label(f"Error: {error.message}").classes("text-sm issue-error")
+        for warning in warnings:
+            ui.label(f"Warning: {warning.message}").classes("text-sm issue-warning")
+
+
+def _render_toolpath_issues(response: ToolpathResponse) -> None:
+    if not response.errors and not response.warnings:
+        return
+    with ui.element("div").classes("issue-list"):
+        ui.label("Toolpath Review").classes("text-sm font-semibold text-slate-800")
+        for error in response.errors:
+            ui.label(f"Error: {error.message}").classes("text-sm issue-error")
+        for warning in response.warnings:
+            ui.label(f"Warning: {warning.message}").classes("text-sm issue-warning")
+
+
+def _render_operation_groups(response: PlanningResponse | None) -> None:
+    if response is None or not response.plan:
+        return
+    operations = response.plan.get("operations", [])
+    operations_by_id = {operation["id"]: operation for operation in operations}
+    groups = response.plan.get("operation_groups", [])
+    if not groups:
+        groups = [{"name": "operations", "operations": [operation["id"] for operation in operations]}]
+    with ui.element("div").classes("operation-groups"):
+        ui.label("Operation Plan").classes("text-sm font-semibold text-slate-700")
+        for group in groups:
+            group_operations = [
+                operations_by_id[operation_id]
+                for operation_id in group.get("operations", [])
+                if operation_id in operations_by_id
+            ]
+            entity_ids = _operation_entity_ids(group_operations)
+            with ui.element("div").classes("operation-group"):
+                ui.html(
+                    _operation_group_button(group["name"], entity_ids, len(group_operations))
+                )
+                for operation in group_operations:
+                    ui.html(_operation_card(operation, _operation_entity_ids([operation])))
+
+
+def _operation_group_button(name: str, entity_ids: list[str], count: int) -> str:
+    entities = escape(json.dumps(entity_ids))
+    return (
+        f'<button type="button" class="operation-group-title" '
+        f"onclick='dxfwizHighlightEntities(JSON.parse(this.dataset.entities))' "
+        f'data-entities="{entities}">'
+        f"<span>{escape(name.replace('_', ' ').title())}</span><span>{count}</span></button>"
+    )
+
+
+def _operation_card(operation: dict[str, Any], entity_ids: list[str]) -> str:
+    entities = escape(json.dumps(entity_ids))
+    description = operation.get("description") or operation["type"].replace("_", " ").title()
+    if operation.get("tabs", {}).get("enabled"):
+        description = f"{description}: tabs {operation['tabs'].get('count')}"
+    title = f"{operation['id']} - {description}"
+    meta = " | ".join(
+        part
+        for part in [
+            operation.get("type"),
+            f"entity {operation.get('entity')}",
+            f"tool {operation.get('tool')}",
+            f"depth {operation.get('depth')}",
+        ]
+        if part and not part.endswith("None")
+    )
+    operation_yaml = escape(dump_operation_yaml(operation))
+    return (
+        f'<button type="button" class="operation-card" '
+        f"onclick='dxfwizShowOperationYaml(this.dataset.yaml, JSON.parse(this.dataset.entities))' "
+        f'data-entities="{entities}" data-yaml="{operation_yaml}">'
+        f'<div class="operation-card-title">{escape(title)}</div>'
+        f'<div class="operation-card-meta">{escape(meta)}</div>'
+        f"</button>"
+    )
+
+
+def _operation_entity_ids(operations: list[dict[str, Any]]) -> list[str]:
+    result = []
+    for operation in operations:
+        entity_id = operation.get("entity")
+        if entity_id and entity_id not in result:
+            result.append(entity_id)
+    return result
+
+
+def _render_graphics_area(artifacts: ProjectArtifacts, state: dict[str, Any] | None = None) -> None:
     with ui.element("div").classes("graphics-area"):
         with ui.element("div").classes("graphics-toolbar"):
             ui.button(icon="zoom_in", on_click=lambda: ui.run_javascript("dxfwizZoom(0.82)")).props("flat dense").tooltip("Zoom in")
@@ -324,7 +541,8 @@ def _render_graphics_area(artifacts: ProjectArtifacts) -> None:
             dim_button = ui.button("Dimensions", icon="straighten").props("flat dense").classes("toggle-on")
             label_button.on("click", lambda: ui.run_javascript("dxfwizToggleLayer('entity-labels')"))
             dim_button.on("click", lambda: ui.run_javascript("dxfwizToggleLayer('dimension-labels')"))
-        ui.html(render_job_display(artifacts)).classes("graphics-host w-full")
+        ui.html(render_job_display(artifacts, state)).classes("graphics-host w-full")
+        ui.timer(0.1, lambda: ui.run_javascript("window.dxfwizInstallViewerHooks && window.dxfwizInstallViewerHooks()"), once=True)
 
 
 def _planning_context(
@@ -600,6 +818,9 @@ def _planning_request(
                 "workholding_method": inputs.get("workholding_method") or [],
                 "tools": inputs.get("tools"),
                 "planning_notes": inputs.get("planning_notes"),
+                "finishing_allowance": planner.defaults.finishing_allowance,
+                "cut_deeper_than_stock": planner.defaults.cut_deeper_than_stock,
+                "screw_spacing": planner.defaults.screw_spacing,
             },
         }
     )
@@ -622,6 +843,10 @@ async def _post_plan_request(request: PlanningRequest) -> PlanningResponse:
     return await asyncio.to_thread(_post_plan_request_sync, request)
 
 
+async def _post_toolpath_request(request: ToolpathRequest) -> ToolpathResponse:
+    return await asyncio.to_thread(_post_toolpath_request_sync, request)
+
+
 def _post_plan_request_sync(request: PlanningRequest) -> PlanningResponse:
     port = int(os.environ.get("DXFWIZ_PORT", "8080"))
     body = json.dumps(request.model_dump(mode="json")).encode("utf-8")
@@ -634,6 +859,20 @@ def _post_plan_request_sync(request: PlanningRequest) -> PlanningResponse:
     with urllib.request.urlopen(http_request, timeout=30) as response:
         data = json.loads(response.read().decode("utf-8"))
     return PlanningResponse.model_validate(data)
+
+
+def _post_toolpath_request_sync(request: ToolpathRequest) -> ToolpathResponse:
+    port = int(os.environ.get("DXFWIZ_PORT", "8080"))
+    body = json.dumps(request.model_dump(mode="json")).encode("utf-8")
+    http_request = urllib.request.Request(
+        f"http://127.0.0.1:{port}/api/toolpaths",
+        data=body,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    with urllib.request.urlopen(http_request, timeout=30) as response:
+        data = json.loads(response.read().decode("utf-8"))
+    return ToolpathResponse.model_validate(data)
 
 
 def _stock_size_from_geometry(geometry: dict[str, Any]) -> str | None:
@@ -767,8 +1006,10 @@ async def handle_upload(event: Any, state: dict, machine: MachineFile, content_h
     render_project_state(content_host, state, machine, artifacts)
 
 
-def render_job_display(artifacts: ProjectArtifacts) -> str:
-    svg = _job_scene_svg(artifacts.geometry_svg)
+def render_job_display(artifacts: ProjectArtifacts, state: dict[str, Any] | None = None) -> str:
+    geometry = _geometry_from_state(artifacts, state)
+    generated_entities = _generated_entities_from_geometry(geometry)
+    svg = _job_scene_svg(artifacts.geometry_svg, geometry, generated_entities)
     return f"""
     <div class="dxf-viewer">
       {svg}
@@ -825,6 +1066,22 @@ def render_job_display(artifacts: ProjectArtifacts) -> str:
       .scene-svg:focus {{ box-shadow: inset 0 0 0 2px #2563eb; }}
       .scene-svg.panning {{ cursor: grabbing; }}
       #dxfwiz-scene .role-ignored {{ display: none; }}
+      #dxfwiz-scene #legend-layer {{ display: none; }}
+      #dxfwiz-scene #workholding-layer .workholding-outline {{
+        fill: rgba(251, 146, 60, 0.12);
+        stroke: #f97316;
+        stroke-width: 2px;
+        vector-effect: non-scaling-stroke;
+      }}
+      #dxfwiz-scene #workholding-layer .workholding-label {{
+        fill: #f97316;
+        font-family: Segoe UI, Arial, sans-serif;
+        font-weight: 800;
+        paint-order: stroke;
+        stroke: #ffffff;
+        stroke-width: 0.06px;
+        vector-effect: non-scaling-stroke;
+      }}
     </style>
     """
 
@@ -1011,11 +1268,10 @@ def _viewer_script() -> str:
         const vb = (svg.dataset.currentViewBox || svg.getAttribute('viewBox')).split(' ').map(Number);
         const cx = vb[0] + vb[2] / 2;
         const cy = vb[1] + vb[3] / 2;
-        ['geometry-layer', 'annotation-layer'].forEach(id => {
-          const layer = svg.querySelector('#' + id);
-          if (layer) layer.setAttribute('transform', `rotate(${next} ${cx} ${cy})`);
+        svg.querySelectorAll('#geometry-layer, #annotation-layer, #workholding-layer').forEach(layer => {
+          layer.setAttribute('transform', `rotate(${next} ${cx} ${cy})`);
         });
-        svg.querySelectorAll('.entity-name-text, .diameter-label').forEach(text => {
+        svg.querySelectorAll('.entity-name-text, .diameter-label, .workholding-label').forEach(text => {
           const x = text.getAttribute('x') || '0';
           const y = text.getAttribute('y') || '0';
           text.setAttribute('transform', `rotate(${-next} ${x} ${y})`);
@@ -1024,21 +1280,66 @@ def _viewer_script() -> str:
       window.dxfwizToggleLayer = function(layerName) {
         const svg = document.getElementById('dxfwiz-scene');
         if (!svg) return;
-        const selectors = {
-          'entity-labels': ['.entity-name-label'],
-          'dimension-labels': ['.diameter-label', '.leader-line', '.callout-bubble']
-        }[layerName] || [];
-        const key = 'show' + layerName.replace(/(^|-)([a-z])/g, (_, _dash, ch) => ch.toUpperCase());
-        const visible = svg.dataset[key] !== '0';
-        svg.dataset[key] = visible ? '0' : '1';
-        selectors.forEach(selector => {
-          svg.querySelectorAll(selector).forEach(element => {
-            element.style.display = visible ? 'none' : '';
+        const className = layerName === 'entity-labels' ? 'hide-entity-labels' : 'hide-dimension-labels';
+        const hidden = svg.classList.toggle(className);
+        if (document.activeElement) {
+          document.activeElement.classList.toggle('toggle-on', !hidden);
+        }
+      };
+      window.dxfwizHighlightEntities = function(entityIds) {
+        const svg = document.getElementById('dxfwiz-scene');
+        if (!svg) return;
+        svg.querySelectorAll('.selected-entity').forEach(element => {
+          element.classList.remove('selected-entity');
+        });
+        const wanted = new Set((entityIds || []).map(entityId => String(entityId)));
+        if (wanted.size === 0) {
+          svg.focus();
+          return;
+        }
+        svg.querySelectorAll('[data-entity-id], [data-entity-ref]').forEach(element => {
+          const entityId = element.dataset.entityId || element.dataset.entityRef;
+          if (wanted.has(String(entityId))) {
+            element.classList.add('selected-entity');
+          }
+        });
+        svg.focus();
+      };
+      window.dxfwizShowOperationYaml = function(yamlText, entityIds) {
+        window.dxfwizHighlightEntities(entityIds);
+        let panel = document.getElementById('operation-yaml-popover');
+        if (!panel) {
+          panel = document.createElement('div');
+          panel.id = 'operation-yaml-popover';
+          panel.className = 'operation-yaml-popover';
+          document.body.appendChild(panel);
+        }
+        panel.innerHTML = "<header><span>Operation YAML</span><button type=\"button\" aria-label=\"Dismiss\" onclick=\"this.closest('.operation-yaml-popover').remove()\">x</button></header><pre></pre>";
+        panel.querySelector('pre').textContent = yamlText || '';
+      };
+
+      window.dxfwizInitSplitter = function() {
+        document.querySelectorAll('.toolpaths-grid').forEach(grid => {
+          const splitter = grid.querySelector('.splitter');
+          if (!splitter || splitter.dataset.ready === '1') return;
+          splitter.dataset.ready = '1';
+          splitter.addEventListener('pointerdown', function(event) {
+            event.preventDefault();
+            splitter.classList.add('dragging');
+            const rect = grid.getBoundingClientRect();
+            function move(moveEvent) {
+              const rightWidth = Math.min(Math.max(rect.right - moveEvent.clientX, 320), rect.width * 0.72);
+              grid.style.gridTemplateColumns = `minmax(0, 1fr) 7px ${rightWidth}px`;
+            }
+            function stop() {
+              splitter.classList.remove('dragging');
+              window.removeEventListener('pointermove', move);
+              window.removeEventListener('pointerup', stop);
+            }
+            window.addEventListener('pointermove', move);
+            window.addEventListener('pointerup', stop);
           });
         });
-        if (document.activeElement) {
-          document.activeElement.classList.toggle('toggle-on', !visible);
-        }
       };
 
       window.dxfwizInitViewer = function() {
@@ -1049,8 +1350,6 @@ def _viewer_script() -> str:
         svg.setAttribute('viewBox', initial);
         svg.dataset.initialViewBox = initial;
         svg.dataset.currentViewBox = initial;
-        svg.dataset.showEntityLabels = '1';
-        svg.dataset.showDimensionLabels = '1';
         svg.dataset.rotation = svg.dataset.rotation || '0';
         let dragging = false;
         let last = null;
@@ -1062,7 +1361,6 @@ def _viewer_script() -> str:
         svg.addEventListener('selectstart', function(event) { event.preventDefault(); });
         svg.addEventListener('focus', function() { svg.dataset.zoomActive = '1'; });
         svg.addEventListener('wheel', function(event) {
-          if (svg.dataset.zoomActive !== '1') return;
           event.preventDefault();
           const vb = current();
           const rect = svg.getBoundingClientRect();
@@ -1103,9 +1401,21 @@ def _viewer_script() -> str:
           try { svg.releasePointerCapture(event.pointerId); } catch (_) {}
         });
       };
-      window.dxfwizInitViewer();
-      new MutationObserver(() => window.dxfwizInitViewer())
-        .observe(document.body, { childList: true, subtree: true });
+      window.dxfwizInstallViewerHooks = function() {
+        window.dxfwizInitViewer();
+        window.dxfwizInitSplitter();
+        if (window.dxfwizMutationObserver || !document.body) return;
+        window.dxfwizMutationObserver = new MutationObserver(() => {
+          window.dxfwizInitViewer();
+          window.dxfwizInitSplitter();
+        });
+        window.dxfwizMutationObserver.observe(document.body, { childList: true, subtree: true });
+      };
+      if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', window.dxfwizInstallViewerHooks);
+      } else {
+        window.dxfwizInstallViewerHooks();
+      }
     </script>
     """
 
@@ -1136,8 +1446,60 @@ def _job_details(artifacts: ProjectArtifacts) -> str:
     return " | ".join(details)
 
 
-def _job_scene_svg(svg_path: Path) -> str:
+def _geometry_from_state(artifacts: ProjectArtifacts, state: dict[str, Any] | None) -> dict[str, Any]:
+    if state and state.get("geometry"):
+        return state["geometry"]
+    return artifacts.geometry
+
+
+def _generated_entities_from_geometry(geometry: dict[str, Any]) -> list[dict[str, Any]]:
+    return geometry.get("generated_entities", [])
+
+
+def _write_project_geometry(artifacts: ProjectArtifacts, geometry: dict[str, Any]) -> None:
+    try:
+        dump_yaml_file(artifacts.geom_yaml, geometry)
+        logger.info("Updated geom.yaml for project %s with generated geometry", artifacts.project_id)
+    except Exception:
+        logger.exception("Failed to update geom.yaml for project %s", artifacts.project_id)
+
+
+def _op_yaml_path(artifacts: ProjectArtifacts) -> Path:
+    return artifacts.geom_yaml.with_name("op.yaml")
+
+
+def _gcode_path(artifacts: ProjectArtifacts) -> Path:
+    return artifacts.geom_yaml.with_name("toolpaths.nc")
+
+
+def _write_project_op_yaml(artifacts: ProjectArtifacts, op_yaml: str) -> None:
+    if not op_yaml:
+        return
+    try:
+        _op_yaml_path(artifacts).write_text(op_yaml, encoding="utf-8")
+        logger.info("Wrote op.yaml for project %s", artifacts.project_id)
+    except Exception:
+        logger.exception("Failed to write op.yaml for project %s", artifacts.project_id)
+
+
+def _write_project_gcode(artifacts: ProjectArtifacts, gcode: str) -> None:
+    if not gcode:
+        return
+    try:
+        _gcode_path(artifacts).write_text(gcode, encoding="utf-8")
+        logger.info("Wrote toolpaths.nc for project %s", artifacts.project_id)
+    except Exception:
+        logger.exception("Failed to write toolpaths.nc for project %s", artifacts.project_id)
+
+
+def _job_scene_svg(
+    svg_path: Path,
+    geometry: dict[str, Any],
+    generated_entities: list[dict[str, Any]] | None = None,
+) -> str:
     svg = svg_path.read_text(encoding="utf-8")
+    if generated_entities:
+        svg = svg.replace("</svg>", _workholding_layer(generated_entities, geometry) + "\n</svg>")
     viewbox = _svg_viewbox(svg_path)
     viewbox_attr = ""
     if viewbox:
@@ -1149,6 +1511,46 @@ def _job_scene_svg(svg_path: Path) -> str:
         svg,
         count=1,
     )
+
+
+def _workholding_layer(generated_entities: list[dict[str, Any]], geometry: dict[str, Any]) -> str:
+    bounds = geometry["summary"]["bounding_box"]
+    max_y = bounds["max"]["y"]
+    width = max(bounds["max"]["x"] - bounds["min"]["x"], 1e-6)
+    height = max(bounds["max"]["y"] - bounds["min"]["y"], 1e-6)
+    marker_radius = min(max(max(width, height) / 420, 0.035), 0.095)
+    font_size = marker_radius * 3.4
+    elements = ['<g id="workholding-layer">']
+    for entity in generated_entities:
+        entity_id = escape(entity["id"])
+        if entity["shape"] == "circle" and entity.get("center"):
+            x = entity["center"]["x"]
+            y = max_y - entity["center"]["y"]
+            radius = (entity.get("diameter") or 0.1) / 2
+            elements.append(f'<g class="workholding-entity" data-entity-ref="{entity_id}">')
+            elements.append(
+                f'<circle class="workholding-outline" data-entity-id="{entity_id}" cx="{x:.6f}" cy="{y:.6f}" r="{radius:.6f}" />'
+            )
+            elements.append(
+                f'<text class="workholding-label" data-entity-ref="{entity_id}" x="{x + radius:.6f}" y="{y - radius:.6f}" font-size="{font_size:.6f}px">{entity_id}</text>'
+            )
+            elements.append("</g>")
+        elif entity["shape"] == "rectangle" and entity.get("lower_left") and entity.get("upper_right"):
+            x1 = entity["lower_left"]["x"]
+            x2 = entity["upper_right"]["x"]
+            y1 = max_y - entity["upper_right"]["y"]
+            y2 = max_y - entity["lower_left"]["y"]
+            elements.append(f'<g class="workholding-entity" data-entity-ref="{entity_id}">')
+            elements.append(
+                f'<rect class="workholding-outline" data-entity-id="{entity_id}" x="{x1:.6f}" y="{y1:.6f}" width="{(x2 - x1):.6f}" height="{(y2 - y1):.6f}" />'
+            )
+            if entity.get("role") != "tab":
+                elements.append(
+                    f'<text class="workholding-label" data-entity-ref="{entity_id}" x="{x2:.6f}" y="{y1:.6f}" font-size="{font_size:.6f}px">{entity_id}</text>'
+                )
+            elements.append("</g>")
+    elements.append("</g>")
+    return "\n".join(elements)
 
 
 def _combined_viewbox(

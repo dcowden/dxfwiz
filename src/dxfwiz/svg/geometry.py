@@ -170,9 +170,10 @@ def _render_entity(
                 marker_radius=marker_radius,
                 circle_center=(cx, cy),
                 circle_radius=radius,
+                entity_id=geom_entity["id"],
             )
         annotation = (
-            f'<g class="entity-annotation circle-annotation" data-entity-ref="{escape(geom_entity["id"])}">\n'
+            f'<g class="entity-annotation circle-annotation {classes}" data-entity-ref="{escape(geom_entity["id"])}">\n'
             f'    <circle class="center-marker" cx="{cx:.6f}" cy="{cy:.6f}" r="{marker_radius * 0.75:.6f}" />\n'
             f"{label_text}"
             f"  </g>"
@@ -197,7 +198,7 @@ def _render_entity(
             f"  </g>"
         )
         annotation = (
-            f'<g class="entity-annotation polyline-annotation" data-entity-ref="{escape(geom_entity["id"])}">\n'
+            f'<g class="entity-annotation polyline-annotation {classes}" data-entity-ref="{escape(geom_entity["id"])}">\n'
             f"    {vertex_markers}\n"
             f"  </g>"
         )
@@ -540,6 +541,7 @@ def _render_callout_label(
     marker_radius: float,
     circle_center: tuple[float, float],
     circle_radius: float,
+    entity_id: str,
 ) -> str:
     line_height = marker_radius * 2.8 * 1.18
     x = placement.x
@@ -555,10 +557,11 @@ def _render_callout_label(
     bubble_height = bubble_y2 - bubble_y1
     leader_start = (bubble_x1, (bubble_y1 + bubble_y2) / 2)
     leader_end = _circle_point_toward(circle_center, circle_radius, leader_start)
+    data_ref = f'data-entity-ref="{escape(entity_id)}"'
     return (
-        f'    <path class="leader-line" d="M {leader_start[0]:.6f} {leader_start[1]:.6f} L {leader_end[0]:.6f} {leader_end[1]:.6f}" marker-end="url(#leader-arrow)" />\n'
-        f'    <rect class="callout-bubble" x="{bubble_x1:.6f}" y="{bubble_y1:.6f}" width="{bubble_width:.6f}" height="{bubble_height:.6f}" rx="{marker_radius * 1.3:.6f}" />\n'
-        f'    <text class="diameter-label" x="{x:.6f}" y="{y:.6f}">'
+        f'    <path class="leader-line" {data_ref} d="M {leader_start[0]:.6f} {leader_start[1]:.6f} L {leader_end[0]:.6f} {leader_end[1]:.6f}" marker-end="url(#leader-arrow)" />\n'
+        f'    <rect class="callout-bubble" {data_ref} x="{bubble_x1:.6f}" y="{bubble_y1:.6f}" width="{bubble_width:.6f}" height="{bubble_height:.6f}" rx="{marker_radius * 1.3:.6f}" />\n'
+        f'    <text class="diameter-label" {data_ref} x="{x:.6f}" y="{y:.6f}">'
         + "".join(tspans)
         + "</text>\n"
     )

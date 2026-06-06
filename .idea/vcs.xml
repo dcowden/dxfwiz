@@ -2,5 +2,9 @@
 <project version="4">
   <component name="VcsDirectoryMappings">
     <mapping directory="$PROJECT_DIR$" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/docs/references/OpenBuilds-Fusion360-Postprocessor" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/docs/references/avid-fusion-post-processor" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/docs/references/grid-apps" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/docs/references/mpcnc_post_processor" vcs="Git" />
   </component>
 </project>

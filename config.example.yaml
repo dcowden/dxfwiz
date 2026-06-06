@@ -1,0 +1,9 @@
+planner:
+  mode: local  # local | ai
+
+gemini:
+  api_key: "REPLACE_WITH_GEMINI_API_KEY"
+  model: "gemini/gemini-2.5-pro"
+  temperature: 0.1
+  timeout_seconds: 120
+  max_retries: 2

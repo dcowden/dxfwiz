@@ -1,8 +1,8 @@
 from pathlib import Path
 
-from dxfwiz.api import plan_operations
 from dxfwiz.dxf import clean_dxf, write_geometry_yaml
-from dxfwiz.planning import PlanningRequest, load_system_planner_advice
+from dxfwiz.planning import PlanningRequest, generate_operation_plan, load_system_planner_advice
+from dxfwiz.planning.service import PlanningResponse
 from dxfwiz.schemas import GeometryFile, MachineFile, PlannerFile
 from dxfwiz.schemas.job import JobFile
 from dxfwiz.yaml_io import load_yaml_file
@@ -14,7 +14,7 @@ ROOT = Path(__file__).resolve().parents[1]
 def test_planner_returns_errors_for_missing_required_inputs(tmp_path):
     request = _planning_request(tmp_path, inputs={"stock_xy": "10 x 10 in"})
 
-    response = plan_operations(request)
+    response = generate_operation_plan(request, client=FakePlannerClient())
 
     assert response.plan is None
     assert response.op_yaml == ""
@@ -27,7 +27,7 @@ def test_planner_returns_errors_for_missing_required_inputs(tmp_path):
     }
 
 
-def test_planner_generates_job_like_operation_plan(tmp_path):
+def test_planner_calls_ai_client_for_operation_plan(tmp_path):
     request = _planning_request(
         tmp_path,
         inputs={
@@ -39,18 +39,48 @@ def test_planner_generates_job_like_operation_plan(tmp_path):
             "coordinate_system": "G55",
             "workholding_method": ["screws"],
             "tools": "t5",
+            "cut_deeper_than_stock": 0.01,
+            "finishing_allowance": 0.01,
         },
     )
+    client = FakePlannerClient()
 
-    response = plan_operations(request)
+    response = generate_operation_plan(request, client=client)
 
+    assert client.called
     assert response.errors == []
     assert response.plan is not None
+    assert response.geometry is not None
+    GeometryFile.model_validate(response.geometry)
+    assert response.geometry["summary"]["generated_count"] == len(response.geometry["generated_entities"])
+    assert any(entity["id"].startswith("wh") for entity in response.geometry["generated_entities"])
     assert "operations:" in response.op_yaml
     job = JobFile.model_validate(response.plan)
     assert job.stock.material == "plywood"
     assert job.coordinate_system == "G55"
     assert {operation.type for operation in job.operations} >= {"contour", "drill"}
+    assert job.tools[0].tool == "t5"
+    assert job.tools[0].diameter == 0.25
+
+
+class FakePlannerClient:
+    def __init__(self) -> None:
+        self.called = False
+
+    def generate(self, request: PlanningRequest) -> PlanningResponse:
+        self.called = True
+        from dxfwiz.planning.service import _build_plan, _dump_yaml, _geometry_with_generated_entities
+
+        plan = _build_plan(request, [])
+        job = JobFile.model_validate(plan)
+        plan_data = job.model_dump(mode="json", exclude_none=True)
+        return PlanningResponse(
+            errors=[],
+            warnings=[],
+            geometry=_geometry_with_generated_entities(request.geometry, plan_data),
+            plan=plan_data,
+            op_yaml=_dump_yaml(plan_data),
+        )
 
 
 def _planning_request(tmp_path, inputs):

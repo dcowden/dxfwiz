@@ -7,10 +7,12 @@ from typing import Any, Literal
 from pydantic import Field
 from ruamel.yaml import YAML
 
+from dxfwiz.config import load_config
 from dxfwiz.schemas import GeometryFile, JobFile, MachineFile, PlannerFile
 from dxfwiz.schemas.common import StrictModel, Units
 from dxfwiz.schemas.job import JobInfo, Stock
 from dxfwiz.schemas.planner import OperationAdvice
+from dxfwiz.planning.yaml_format import dump_operation_yaml
 
 
 logger = logging.getLogger(__name__)
@@ -33,6 +35,9 @@ class PlannerInputs(StrictModel):
     workholding_method: list[str] = Field(default_factory=list)
     tools: str | list[str] | None = None
     planning_notes: str | None = None
+    finishing_allowance: float = Field(default=0.0, ge=0)
+    cut_deeper_than_stock: float = Field(default=0.0, ge=0)
+    screw_spacing: float | None = Field(default=None, gt=0)
 
 
 class PlanningRequest(StrictModel):
@@ -46,6 +51,7 @@ class PlanningRequest(StrictModel):
 class PlanningResponse(StrictModel):
     errors: list[PlanningIssue] = Field(default_factory=list)
     warnings: list[PlanningIssue] = Field(default_factory=list)
+    geometry: dict[str, Any] | None = None
     plan: dict[str, Any] | None = None
     op_yaml: str = ""
 
@@ -57,27 +63,55 @@ def load_system_planner_advice() -> OperationAdvice:
     return OperationAdvice.model_validate(data["operation_advice"])
 
 
-def generate_operation_plan(request: PlanningRequest) -> PlanningResponse:
+def generate_operation_plan(request: PlanningRequest, client: Any | None = None) -> PlanningResponse:
     logger.info("Generating operation plan")
     errors = _validate_required_inputs(request.inputs)
     warnings = _planning_warnings(request)
     if errors:
         logger.info("Operation plan has %d blocking input error(s)", len(errors))
-        return PlanningResponse(errors=errors, warnings=warnings, plan=None, op_yaml="")
+        return PlanningResponse(
+            errors=errors,
+            warnings=warnings,
+            geometry=request.geometry.model_dump(mode="json", exclude_none=True),
+            plan=None,
+            op_yaml="",
+        )
 
-    plan = _build_plan(request, warnings)
-    job = JobFile.model_validate(plan)
-    logger.info(
-        "Generated operation plan with %d operation(s) and %d warning(s)",
-        len(job.operations),
-        len(warnings),
-    )
-    return PlanningResponse(
-        errors=[],
-        warnings=warnings,
-        plan=job.model_dump(mode="json", exclude_none=True),
-        op_yaml=_dump_yaml(job.model_dump(mode="json", exclude_none=True)),
-    )
+    planner_client = client or _planner_client_from_config()
+    response = planner_client.generate(request)
+    response.warnings = [*warnings, *response.warnings]
+    if response.plan:
+        job = JobFile.model_validate(response.plan)
+        logger.info(
+            "Generated AI operation plan with %d operation(s) and %d warning(s)",
+            len(job.operations),
+            len(response.warnings),
+        )
+    return response
+
+
+def _planner_client_from_config():
+    from dxfwiz.planning.ai import GeminiPlannerClient
+
+    config = load_config()
+    if config.planner.mode == "local":
+        return LocalPlannerClient()
+    return GeminiPlannerClient(config.gemini)
+
+
+class LocalPlannerClient:
+    def generate(self, request: PlanningRequest) -> PlanningResponse:
+        logger.info("Using local deterministic operation planner")
+        plan = _build_plan(request, [])
+        job = JobFile.model_validate(plan)
+        plan_data = job.model_dump(mode="json", exclude_none=True)
+        return PlanningResponse(
+            errors=[],
+            warnings=[],
+            geometry=_geometry_with_generated_entities(request.geometry, plan_data),
+            plan=plan_data,
+            op_yaml=_dump_yaml(plan_data),
+        )
 
 
 def _validate_required_inputs(inputs: PlannerInputs) -> list[PlanningIssue]:
@@ -133,7 +167,38 @@ def _planning_warnings(request: PlanningRequest) -> list[PlanningIssue]:
                 message="Additional instructions are preserved for review but not fully interpreted by the first-pass planner.",
             )
         )
+    close_part_warning = _close_part_warning(request)
+    if close_part_warning is not None:
+        warnings.append(close_part_warning)
     return warnings
+
+
+def _close_part_warning(request: PlanningRequest) -> PlanningIssue | None:
+    boxes = _part_boxes(request.geometry)
+    if len(boxes) < 2:
+        return None
+    tool = _best_tool(request)
+    min_gap = min(
+        _box_gap(first, second)
+        for index, first in enumerate(boxes)
+        for second in boxes[index + 1 :]
+    )
+    if min_gap >= tool.diameter:
+        return None
+    return PlanningIssue(
+        code="parts_too_close",
+        message=(
+            f"Some parts are only {min_gap:.3f} {request.geometry.units.length} apart, "
+            f"which is less than selected tool diameter {tool.diameter:.3f}. "
+            "Verify nesting clearance before generating toolpaths."
+        ),
+    )
+
+
+def _box_gap(first, second) -> float:
+    dx = max(first.min.x - second.max.x, second.min.x - first.max.x, 0.0)
+    dy = max(first.min.y - second.max.y, second.min.y - first.max.y, 0.0)
+    return (dx * dx + dy * dy) ** 0.5
 
 
 def _build_plan(request: PlanningRequest, warnings: list[PlanningIssue]) -> dict[str, Any]:
@@ -147,37 +212,75 @@ def _build_plan(request: PlanningRequest, warnings: list[PlanningIssue]) -> dict
     entities = {entity.id: entity for entity in geometry.entities}
     nodes = _flatten_nodes([node.model_dump() for node in geometry.entity_map])
     operations: list[dict[str, Any]] = []
+    generated_entities: list[dict[str, Any]] = []
+    groups: dict[str, list[str]] = {
+        "fixtures": [],
+        "internal_pockets": [],
+        "internal_holes": [],
+        "contours": [],
+        "finish_contours": [],
+    }
+    cut_depth = stock_thickness + _cut_deeper_than_stock(request)
 
     if "screws" in inputs.workholding_method:
-        operations.append(
-            {
-                "id": "op1",
-                "type": "drill",
-                "description": "Pre-drill screw locations in stock corners and scrap areas",
-                "entity": _first_frame_or_part(nodes),
-                "tool": tool.id,
-                "depth": min(stock_thickness, tool.depth_per_pass or stock_thickness),
-                "peck_depth": min(tool.depth_per_pass or tool.diameter, stock_thickness),
-                "retract_amount": machine.machine.clear_z,
-            }
-        )
+        for entity in _screw_entities(geometry, tool.diameter, inputs.screw_spacing):
+            generated_entities.append(entity)
+            op = _screw_drill_operation(
+                len(operations) + 1,
+                entity["id"],
+                tool.id,
+                min(stock_thickness, tool.depth_per_pass or stock_thickness),
+                machine.machine.clear_z,
+                tool,
+            )
+            operations.append(op)
+            groups["fixtures"].append(op["id"])
 
     for node in nodes:
         entity = entities.get(node["entity"])
         if entity is None or node["role"] in {"frame", "ignored", "uncontained"}:
             continue
         if node["role"] == "cutout" and entity.shape != "circle":
-            operations.append(_pocket_operation(len(operations) + 1, entity.id, tool.id, stock_thickness, milling_direction))
+            op = _pocket_operation(len(operations) + 1, entity.id, tool.id, cut_depth, milling_direction)
+            operations.append(op)
+            groups["internal_pockets"].append(op["id"])
     for node in nodes:
         entity = entities.get(node["entity"])
         if entity is None or node["role"] != "cutout" or entity.shape != "circle":
             continue
-        operations.append(_hole_operation(len(operations) + 1, entity, tool.id, stock_thickness, milling_direction))
+        op = _hole_operation(len(operations) + 1, entity, tool.id, cut_depth, milling_direction)
+        operations.append(op)
+        groups["internal_holes"].append(op["id"])
     for node in nodes:
         entity = entities.get(node["entity"])
         if entity is None or node["role"] != "part":
             continue
-        operations.append(_contour_operation(len(operations) + 1, entity.id, tool.id, stock_thickness, milling_direction, inputs, request))
+        rough = _contour_operation(
+            len(operations) + 1,
+            entity,
+            tool.id,
+            cut_depth,
+            "conventional",
+            inputs,
+            request,
+            finish=False,
+        )
+        operations.append(rough)
+        groups["contours"].append(rough["id"])
+        if rough.get("tabs", {}).get("locations"):
+            generated_entities.extend(_tab_entities(rough["entity"], rough["tabs"]["locations"]))
+        finish = _contour_operation(
+            len(operations) + 1,
+            entity,
+            tool.id,
+            cut_depth,
+            "climb",
+            inputs,
+            request,
+            finish=True,
+        )
+        operations.append(finish)
+        groups["finish_contours"].append(finish["id"])
 
     if not operations:
         warnings.append(
@@ -205,6 +308,13 @@ def _build_plan(request: PlanningRequest, warnings: list[PlanningIssue]) -> dict
             origin_location=request.machine.machine.coordinate_system.origin,
         ).model_dump(mode="json"),
         "coordinate_system": inputs.coordinate_system or "G54",
+        "tools": _tool_summary(operations, request.machine),
+        "generated_entities": generated_entities,
+        "operation_groups": [
+            {"name": name, "operations": op_ids}
+            for name, op_ids in groups.items()
+            if op_ids
+        ],
         "operations": operations,
     }
 
@@ -231,14 +341,6 @@ def _flatten_nodes(nodes: list[dict[str, Any]]) -> list[dict[str, Any]]:
         result.append(node)
         result.extend(_flatten_nodes(node.get("children", [])))
     return result
-
-
-def _first_frame_or_part(nodes: list[dict[str, Any]]) -> str:
-    for role in ("frame", "part"):
-        for node in nodes:
-            if node["role"] == role:
-                return node["entity"]
-    return nodes[0]["entity"] if nodes else "e1"
 
 
 def _pocket_operation(index: int, entity_id: str, tool_id: str, depth: float, direction: str) -> dict[str, Any]:
@@ -277,33 +379,227 @@ def _hole_operation(index: int, entity, tool_id: str, depth: float, direction: s
 
 def _contour_operation(
     index: int,
-    entity_id: str,
+    entity,
     tool_id: str,
     depth: float,
     direction: str,
     inputs: PlannerInputs,
     request: PlanningRequest,
+    finish: bool,
 ) -> dict[str, Any]:
-    tabs_enabled = "tabs" in request.machine.machine.part_holding
+    entity_id = entity.id
+    tabs_enabled = "tabs" in request.machine.machine.part_holding and not finish
     tab_height = 0.06 if (inputs.stock_material or "").lower() == "polycarbonate" else 0.1
+    finishing_allowance = 0.0 if finish else request.inputs.finishing_allowance
+    tab_width = max(inputs.stock_thickness or depth, 0.01)
+    tab_locations = _tab_locations(entity, tab_width, tab_height) if tabs_enabled else []
     return {
         "id": f"op{index}",
         "type": "contour",
-        "description": f"Outer contour for part {entity_id}",
+        "description": f"{'Finish ' if finish else 'Rough '}outer contour for part {entity_id}",
         "entity": entity_id,
         "offset": "outside",
         "tool": tool_id,
         "depth": depth,
         "milling_direction": direction,
-        "finishing_allowance": 0.0,
+        "finishing_allowance": finishing_allowance,
+        "finishing_pass": {"enabled": finish, "allowance": 0.0},
         "tabs": {
             "enabled": tabs_enabled,
-            "width": max(depth, 0.01),
+            "width": tab_width,
             "height": min(tab_height, depth),
-            "count": 4,
+            "count": len(tab_locations) if tab_locations else 4,
+            "locations": tab_locations,
         },
         "lead_in": {"type": "line", "length": 0.25},
     }
+
+
+def _cut_deeper_than_stock(request: PlanningRequest) -> float:
+    return request.inputs.cut_deeper_than_stock
+
+
+def _screw_entities(geometry: GeometryFile, diameter: float, spacing: float | None = None) -> list[dict[str, Any]]:
+    bounds = _frame_or_summary_bounds(geometry)
+    min_x, min_y, max_x, max_y = bounds
+    inset = max(diameter * 2.5, 0.25)
+    points: list[tuple[float, float]] = [
+        (min_x + inset, min_y + inset),
+        (max_x - inset, min_y + inset),
+        (max_x - inset, max_y - inset),
+        (min_x + inset, max_y - inset),
+    ]
+    if spacing:
+        points.extend(_perimeter_screw_points(min_x, min_y, max_x, max_y, inset, spacing))
+    points = _points_in_scrap(points, geometry)
+    points = _unique_points(points)
+    return [
+        {
+            "id": f"wh{index}",
+            "role": "screw_hole",
+            "shape": "circle",
+            "center": {"x": x, "y": y},
+            "diameter": diameter,
+        }
+        for index, (x, y) in enumerate(points, start=1)
+    ]
+
+
+def _perimeter_screw_points(
+    min_x: float,
+    min_y: float,
+    max_x: float,
+    max_y: float,
+    inset: float,
+    spacing: float,
+) -> list[tuple[float, float]]:
+    left = min_x + inset
+    right = max_x - inset
+    bottom = min_y + inset
+    top = max_y - inset
+    if right <= left or top <= bottom:
+        return []
+    return [
+        *((x, bottom) for x in _interior_spacing_points(left, right, spacing)),
+        *((x, top) for x in _interior_spacing_points(left, right, spacing)),
+        *((left, y) for y in _interior_spacing_points(bottom, top, spacing)),
+        *((right, y) for y in _interior_spacing_points(bottom, top, spacing)),
+    ]
+
+
+def _interior_spacing_points(start: float, end: float, spacing: float) -> list[float]:
+    points = []
+    value = start + spacing
+    while value < end - spacing * 0.25:
+        points.append(value)
+        value += spacing
+    return points
+
+
+def _unique_points(points: list[tuple[float, float]]) -> list[tuple[float, float]]:
+    result = []
+    seen = set()
+    for x, y in points:
+        key = (round(x, 6), round(y, 6))
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append((x, y))
+    return result
+
+
+def _points_in_scrap(points: list[tuple[float, float]], geometry: GeometryFile) -> list[tuple[float, float]]:
+    if not any(node.role == "frame" for node in geometry.entity_map):
+        return points
+    part_boxes = _part_boxes(geometry)
+    result = []
+    for point in points:
+        if any(_box_contains_point(box, point) for box in part_boxes):
+            continue
+        result.append(point)
+    return result
+
+
+def _part_boxes(geometry: GeometryFile):
+    entities = {entity.id: entity for entity in geometry.entities}
+    boxes = []
+    for node in _flatten_nodes([node.model_dump() for node in geometry.entity_map]):
+        if node["role"] != "part":
+            continue
+        entity = entities.get(node["entity"])
+        if entity and entity.bounding_box:
+            boxes.append(entity.bounding_box)
+    return boxes
+
+
+def _box_contains_point(box, point: tuple[float, float]) -> bool:
+    x, y = point
+    return box.min.x <= x <= box.max.x and box.min.y <= y <= box.max.y
+
+
+def _screw_drill_operation(index: int, entity_id: str, tool_id: str, depth: float, clear_z: float, tool) -> dict[str, Any]:
+    return {
+        "id": f"op{index}",
+        "type": "drill",
+        "description": f"Pre-drill screw location {entity_id}",
+        "entity": entity_id,
+        "tool": tool_id,
+        "depth": depth,
+        "peck_depth": min(tool.depth_per_pass or tool.diameter, depth),
+        "retract_amount": clear_z,
+    }
+
+
+def _frame_or_summary_bounds(geometry: GeometryFile) -> tuple[float, float, float, float]:
+    entities = {entity.id: entity for entity in geometry.entities}
+    for node in geometry.entity_map:
+        if node.role == "frame":
+            entity = entities.get(node.entity)
+            if entity and entity.bounding_box:
+                box = entity.bounding_box
+                return box.min.x, box.min.y, box.max.x, box.max.y
+    box = geometry.summary.bounding_box
+    return box.min.x, box.min.y, box.max.x, box.max.y
+
+
+def _tab_locations(entity, width: float, height: float) -> list[dict[str, Any]]:
+    box = entity.bounding_box
+    if box is None:
+        return []
+    min_x, min_y, max_x, max_y = box.min.x, box.min.y, box.max.x, box.max.y
+    half_w = width / 2
+    half_h = height / 2
+    centers = [
+        ((min_x + max_x) / 2, min_y),
+        (max_x, (min_y + max_y) / 2),
+        ((min_x + max_x) / 2, max_y),
+        (min_x, (min_y + max_y) / 2),
+    ]
+    return [
+        {
+            "center": {"x": x, "y": y},
+            "lower_left": {"x": x - half_w, "y": y - half_h},
+            "upper_right": {"x": x + half_w, "y": y + half_h},
+        }
+        for x, y in centers
+    ]
+
+
+def _tab_entities(part_id: str, locations: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    entities = []
+    for index, location in enumerate(locations, start=1):
+        entities.append(
+            {
+                "id": f"wh_tab_{part_id}_{index}",
+                "role": "tab",
+                "shape": "rectangle",
+                "center": location["center"],
+                "lower_left": location["lower_left"],
+                "upper_right": location["upper_right"],
+            }
+        )
+    return entities
+
+
+def _tool_summary(operations: list[dict[str, Any]], machine: MachineFile) -> list[dict[str, Any]]:
+    tools = {tool.id: tool for tool in machine.tools}
+    seen = set()
+    result = []
+    for operation in operations:
+        tool_id = operation["tool"]
+        if tool_id in seen or tool_id not in tools:
+            continue
+        seen.add(tool_id)
+        result.append({"tool": tool_id, "diameter": tools[tool_id].diameter})
+    return result
+
+
+def _geometry_with_generated_entities(geometry: GeometryFile, plan: dict[str, Any]) -> dict[str, Any]:
+    result = geometry.model_dump(mode="json", exclude_none=True)
+    generated_entities = plan.get("generated_entities", [])
+    result["generated_entities"] = generated_entities
+    result["summary"]["generated_count"] = len(generated_entities)
+    return result
 
 
 def _milling_direction(material: str, flute_spiral: str) -> str:
@@ -314,11 +610,4 @@ def _milling_direction(material: str, flute_spiral: str) -> str:
 
 
 def _dump_yaml(data: dict[str, Any]) -> str:
-    from io import StringIO
-
-    buffer = StringIO()
-    yaml = YAML()
-    yaml.default_flow_style = False
-    yaml.width = 120
-    yaml.dump(data, buffer)
-    return buffer.getvalue()
+    return dump_operation_yaml(data)

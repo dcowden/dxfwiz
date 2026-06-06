@@ -1,0 +1,17 @@
+total_entities: 71
+drills: 6
+helical_drills: 55
+generated_screw_holes:
+  count: 6
+  locations:
+    - {x: 54, y: 9}
+    - {x: 62, y: 9}
+    - {x: 62, y: 56}
+    - {x: 54, y: 56}
+    - {x: 54, y: 45}
+    - {x: 62, y: 45}
+generated_clamps:
+  count: 0
+  positions: []
+rough_contours: 9
+finishing_passes: 9

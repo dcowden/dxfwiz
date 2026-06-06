@@ -1,0 +1,42 @@
+schema_version: "1.0"
+units:
+  length: in
+  speed: in/min
+
+planner:
+  name: "DXF Clean Test Planner"
+  description: "Planner fixture for generated operation-plan integration tests"
+
+defaults:
+  max_tools: 1
+  coordinate_system: G55
+  stock:
+    material: plywood
+    thickness: 0.25
+    z_zero: stock_top
+  origin_location: bottom_left
+  workholding: [screws]
+  part_holding: [tabs]
+  default_tool: t5
+  milling_direction: conventional
+  finishing_allowance: 0.01
+  cut_deeper_than_stock: 0.01
+  screw_spacing: 12.0
+  tab_settings:
+    enabled: true
+    width: 0.25
+    height: 0.1
+    spacing: 3.15
+
+operation_advice:
+  workholding:
+    - "Use screws when the stock frame has enough margin for corner fastening."
+  tools:
+    - "Prefer one tool for the whole job when possible."
+  geometry:
+    - "A strict four-sided rectangle containing parts is a stock frame, not a part."
+    - "Mark top level, four-sided rectangles NOT containing parts as ignored entities."
+    - "For holes between 0.04 inches and 0.2 inches in diameter, prefer a drill operation."
+    - "For holes between 0.2 inches and 0.6 inches in diameter, prefer a helical_drill operation."
+  strategies:
+    - "Plan the job in this order: holes for screws, interior pockets, interior holes, outer boundaries, finish contours."

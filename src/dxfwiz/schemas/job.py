@@ -28,6 +28,13 @@ class Tabs(StrictModel):
     height: float = Field(gt=0)
     count: int | None = Field(default=None, gt=0)
     spacing: float | None = Field(default=None, gt=0)
+    locations: list["TabLocation"] = Field(default_factory=list)
+
+
+class TabLocation(StrictModel):
+    center: dict[str, float]
+    lower_left: dict[str, float]
+    upper_right: dict[str, float]
 
 
 class LeadIn(StrictModel):
@@ -65,10 +72,33 @@ class Operation(StrictModel):
     depth_per_pass: float | None = Field(default=None, gt=0)
 
 
+class ToolUse(StrictModel):
+    tool: str
+    diameter: float = Field(gt=0)
+
+
+class OperationGroup(StrictModel):
+    name: str
+    operations: list[str]
+
+
+class GeneratedEntity(StrictModel):
+    id: str
+    role: Literal["screw_hole", "tab", "clamp"]
+    shape: Literal["circle", "rectangle"]
+    center: dict[str, float] | None = None
+    diameter: float | None = Field(default=None, gt=0)
+    lower_left: dict[str, float] | None = None
+    upper_right: dict[str, float] | None = None
+
+
 class JobFile(StrictModel):
     schema_version: str
     units: Units
     job: JobInfo
     stock: Stock
     coordinate_system: str
+    tools: list[ToolUse] = Field(default_factory=list)
+    generated_entities: list[GeneratedEntity] = Field(default_factory=list)
+    operation_groups: list[OperationGroup] = Field(default_factory=list)
     operations: list[Operation]
