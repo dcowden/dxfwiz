@@ -98,7 +98,7 @@ ToolpathMove = Annotated[
 class ToolpathPass(StrictModel):
     id: str
     operation_id: str
-    entity: str
+    entity: str | None = None
     kind: Literal[
         "rough_contour",
         "finish_contour",
@@ -108,9 +108,10 @@ class ToolpathPass(StrictModel):
         "peck_drill",
         "helical_drill",
         "trace",
+        "move",
     ]
-    tool: str
-    tool_diameter: float = Field(gt=0)
+    tool: str | None = None
+    tool_diameter: float | None = Field(default=None, gt=0)
     z_top: float = 0.0
     z_bottom: float
     source_path: str | None = None
@@ -128,4 +129,3 @@ class ToolpathPlan(StrictModel):
     source_paths: list[SourcePath] = Field(default_factory=list)
     passes: list[ToolpathPass] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
-

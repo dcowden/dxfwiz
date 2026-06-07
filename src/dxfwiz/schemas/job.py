@@ -116,8 +116,19 @@ class TraceOperation(BaseOperation):
     lead_in: LeadIn | None = None
 
 
+class MoveOperation(StrictModel):
+    id: str
+    type: Literal["move"]
+    description: str | None = None
+    x: float | None = None
+    y: float | None = None
+    z: float | None = None
+    is_rapid: bool = True
+    feed_rate: float | None = Field(default=None, gt=0)
+
+
 Operation = Annotated[
-    ContourOperation | PocketOperation | DrillOperation | HelicalDrillOperation | TraceOperation,
+    ContourOperation | PocketOperation | DrillOperation | HelicalDrillOperation | TraceOperation | MoveOperation,
     Field(discriminator="type"),
 ]
 

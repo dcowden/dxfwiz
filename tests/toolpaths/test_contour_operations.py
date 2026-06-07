@@ -233,7 +233,9 @@ def test_contour_offset_validation_uses_realized_toolpath_moves():
         for move in passes[0].moves
         if move.type == "line" and move.x is not None and move.y is not None
     ]
-    assert len(xy_moves) > len(source_path.segments)
+    arc_moves = [move for move in passes[0].moves if move.type == "arc"]
+    assert len(arc_moves) == 4
+    assert len(xy_moves) <= len(source_path.segments)
     PREVIEWS.append(("test_contour_offset_validation_uses_realized_toolpath_moves", source_path, passes))
 
 
@@ -267,12 +269,12 @@ def test_contour_operation_handles_arc_and_line_profile():
     PREVIEWS.append(("test_contour_operation_handles_arc_and_line_profile", source_path, passes))
 
 
-def test_inside_contour_offsets_round_corners_and_warn_when_tool_does_not_fit():
-    source_path = rectangle_source_path("e5", width=1, height=1)
-    tool_that_fits = make_test_tool(diameter=0.4, depth_per_pass=0.1)
-    rough_allowance_operation = ContourOperation.model_validate(
+def test_inside_contour_generates_tiny_path_when_tool_barely_fits_and_warns_when_too_big():
+    tool = make_test_tool(diameter=0.4, depth_per_pass=0.1)
+    slot_that_fits = rectangle_source_path("e5", width=1.0, height=0.41)
+    fits_operation = ContourOperation.model_validate(
         {
-            "id": "op-inside-tight",
+            "id": "op-inside-fits",
             "type": "contour",
             "entity": "e5",
             "tool": "t5",
@@ -281,41 +283,35 @@ def test_inside_contour_offsets_round_corners_and_warn_when_tool_does_not_fit():
             "roughing": {
                 "enabled": True,
                 "depth_per_pass": 0.1,
-                "side_allowance": 0.31,
+                "side_allowance": 0.0,
                 "bottom_allowance": 0.0,
                 "milling_direction": "climb",
             },
-            "finishing": {
-                "enabled": True,
-                "side": True,
-                "bottom": False,
-                "passes": 1,
-                "milling_direction": "climb",
-            },
+            "finishing": {"enabled": False},
         }
     )
 
-    passes = contour_operation_to_toolpaths(rough_allowance_operation, source_path, tool_that_fits, safe_z=0.5)
+    passes = contour_operation_to_toolpaths(fits_operation, slot_that_fits, tool, safe_z=0.5)
 
-    assert [toolpath_pass.kind for toolpath_pass in passes] == ["rough_contour", "finish_contour"]
-    assert passes[0].warnings
-    assert passes[0].moves == []
-    finish_xy_moves = [
+    assert [toolpath_pass.kind for toolpath_pass in passes] == ["rough_contour"]
+    assert passes[0].warnings == []
+    fit_xy_moves = [
         (move.x, move.y)
-        for move in passes[1].moves
+        for move in passes[0].moves
         if move.type == "line" and move.x is not None and move.y is not None
     ]
-    assert len(finish_xy_moves) == len(source_path.segments)
-    assert finish_xy_moves == pytest.approx([(0.2, 0.8), (0.8, 0.8), (0.8, 0.2), (0.2, 0.2)])
-    assert passes[1].warnings == []
-    PREVIEWS.append(("test_inside_contour_offsets_round_corners_tool_fits_finish_only", source_path, passes))
+    xs = [point[0] for point in fit_xy_moves]
+    ys = [point[1] for point in fit_xy_moves]
+    assert max(xs) - min(xs) == pytest.approx(0.6)
+    assert max(ys) - min(ys) == pytest.approx(0.01)
+    PREVIEWS.append(("test_inside_contour_generates_tiny_path_when_tool_barely_fits", slot_that_fits, passes))
 
-    tool_too_big = make_test_tool(diameter=1.2, depth_per_pass=0.1)
+    slot_too_small = rectangle_source_path("e6", width=1.0, height=0.39)
     too_big_operation = ContourOperation.model_validate(
         {
             "id": "op-inside-too-big",
             "type": "contour",
-            "entity": "e5",
+            "entity": "e6",
             "tool": "t5",
             "depth": 0.1,
             "offset": "inside",
@@ -336,12 +332,12 @@ def test_inside_contour_offsets_round_corners_and_warn_when_tool_does_not_fit():
         }
     )
 
-    too_big_passes = contour_operation_to_toolpaths(too_big_operation, source_path, tool_too_big, safe_z=0.5)
+    too_big_passes = contour_operation_to_toolpaths(too_big_operation, slot_too_small, tool, safe_z=0.5)
 
     assert [toolpath_pass.kind for toolpath_pass in too_big_passes] == ["rough_contour", "finish_contour"]
     assert all(toolpath_pass.warnings for toolpath_pass in too_big_passes)
     assert all(toolpath_pass.moves == [] for toolpath_pass in too_big_passes)
-    PREVIEWS.append(("test_inside_contour_offsets_round_corners_tool_too_big", source_path, too_big_passes))
+    PREVIEWS.append(("test_inside_contour_warns_when_tool_does_not_fit", slot_too_small, too_big_passes))
 
 
 def _line_move_z_values(toolpath_pass):

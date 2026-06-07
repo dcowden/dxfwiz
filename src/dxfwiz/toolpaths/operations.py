@@ -11,6 +11,7 @@ from dxfwiz.schemas.common import Point2D
 from dxfwiz.schemas.job import ContourOperation
 from dxfwiz.schemas.machine import Tool
 from dxfwiz.toolpaths.model import (
+    ArcMove,
     LineMove,
     RapidMove,
     SourceArcSegment,
@@ -179,9 +180,9 @@ def offset_distance_statistics(
     source_points = source_path_points(source_path)
     source_line = LineString([*source_points, source_points[0]])
     cut_points: list[tuple[float, float]] = [
-        (move.x, move.y)
-        for move in toolpath_pass.moves
-        if isinstance(move, LineMove) and move.x is not None and move.y is not None
+        (x, y)
+        for _kind, points in _toolpath_render_segments(toolpath_pass)
+        for x, y, _z in points
     ]
     sample_points = []
     for first, second in zip(cut_points, cut_points[1:], strict=False):
@@ -270,6 +271,12 @@ def render_toolpath_preview_sheet_svg(
     colors = {
         "rough_contour": "#2563eb",
         "finish_contour": "#dc2626",
+        "pocket_clear": "#7c3aed",
+        "pocket_floor_finish": "#f59e0b",
+        "pocket_wall_finish": "#dc2626",
+        "peck_drill": "#0f766e",
+        "helical_drill": "#7c3aed",
+        "move": "#64748b",
     }
     lines = [
         f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" viewBox="0 0 {width} {height}">',
@@ -281,6 +288,7 @@ def render_toolpath_preview_sheet_svg(
         ".source-iso { fill: none; stroke: #111827; stroke-width: 2; opacity: 0.45; }",
         ".path { fill: none; stroke-width: 2.5; }",
         ".path-iso { fill: none; stroke-width: 2.5; }",
+        ".arc-path { stroke-width: 3.5; }",
         ".finish { stroke-dasharray: 8 5; }",
         ".dot { stroke: white; stroke-width: 2; }",
         ".panel-label { font-weight: 700; fill: #374151; }",
@@ -291,9 +299,13 @@ def render_toolpath_preview_sheet_svg(
         f'<line x1="{top_width + iso_width + 24}" y1="68" x2="{top_width + iso_width + 54}" y2="68" stroke="#111827" stroke-width="4" />',
         f'<text x="{top_width + iso_width + 66}" y="74">source contour</text>',
         f'<line x1="{top_width + iso_width + 24}" y1="100" x2="{top_width + iso_width + 54}" y2="100" stroke="#2563eb" stroke-width="4" />',
-        f'<text x="{top_width + iso_width + 66}" y="106">rough path</text>',
-        f'<line x1="{top_width + iso_width + 24}" y1="132" x2="{top_width + iso_width + 54}" y2="132" stroke="#dc2626" stroke-width="4" stroke-dasharray="8 5" />',
-        f'<text x="{top_width + iso_width + 66}" y="138">finish path</text>',
+        f'<text x="{top_width + iso_width + 66}" y="106">rough contour</text>',
+        f'<line x1="{top_width + iso_width + 24}" y1="132" x2="{top_width + iso_width + 54}" y2="132" stroke="#7c3aed" stroke-width="4" />',
+        f'<text x="{top_width + iso_width + 66}" y="138">pocket clear</text>',
+        f'<line x1="{top_width + iso_width + 24}" y1="164" x2="{top_width + iso_width + 54}" y2="164" stroke="#dc2626" stroke-width="4" stroke-dasharray="8 5" />',
+        f'<text x="{top_width + iso_width + 66}" y="170">finish path</text>',
+        f'<line x1="{top_width + iso_width + 24}" y1="196" x2="{top_width + iso_width + 54}" y2="196" stroke="#38bdf8" stroke-width="5" />',
+        f'<text x="{top_width + iso_width + 66}" y="202">arc moves</text>',
     ]
     for row_index, (title, source_path, passes) in enumerate(previews):
         lines.extend(
@@ -328,7 +340,8 @@ def _toolpath_preview_row_svg(
     legend_x: int,
 ) -> list[str]:
     source_points = source_path_points(source_path)
-    pass_xyz_points = [_toolpath_xyz_points(toolpath_pass) for toolpath_pass in passes]
+    pass_segments = [_toolpath_render_segments(toolpath_pass) for toolpath_pass in passes]
+    pass_xyz_points = [[point for _kind, points in segments for point in points] for segments in pass_segments]
     pass_points = [[(x, y) for x, y, _z in points] for points in pass_xyz_points]
     all_points = [*source_points, *(point for points in pass_points for point in points)]
     min_x = min(point[0] for point in all_points)
@@ -378,23 +391,31 @@ def _toolpath_preview_row_svg(
         f'<polyline class="source" points="{source_polyline}" />',
         f'<polyline class="source-iso" points="{iso_source_polyline}" />',
     ]
-    for index, (toolpath_pass, points, iso_points) in enumerate(
-        zip(passes, pass_points, iso_projected_sets, strict=True),
+    for index, (toolpath_pass, points, iso_points, segments) in enumerate(
+        zip(passes, pass_points, iso_projected_sets, pass_segments, strict=True),
         start=1,
     ):
         color = colors.get(toolpath_pass.kind, "#7c3aed")
-        screen_points = [screen(point) for point in points]
-        iso_screen_points = [iso_screen(point) for point in iso_points]
         css_class = "path finish" if toolpath_pass.kind == "finish_contour" else "path"
         iso_css_class = "path-iso finish" if toolpath_pass.kind == "finish_contour" else "path-iso"
-        lines.append(
-            f'<polyline class="{css_class}" data-pass="{escape(toolpath_pass.id)}" '
-            f'stroke="{color}" points="{_svg_polyline(screen_points, close=False)}" />'
-        )
-        lines.append(
-            f'<polyline class="{iso_css_class}" data-pass="{escape(toolpath_pass.id)}-iso" '
-            f'stroke="{color}" points="{_svg_polyline(iso_screen_points, close=False)}" />'
-        )
+        screen_points = [screen(point) for point in points]
+        iso_screen_points = [iso_screen(point) for point in iso_points]
+        for segment_index, (segment_kind, segment_points) in enumerate(segments, start=1):
+            segment_color = _move_preview_color(color, segment_kind)
+            segment_class = f"{css_class} arc-path" if segment_kind == "arc" else css_class
+            iso_segment_class = f"{iso_css_class} arc-path" if segment_kind == "arc" else iso_css_class
+            segment_screen_points = [screen((x, y)) for x, y, _z in segment_points]
+            segment_iso_points = [iso_screen(_iso_project(x, y, z)) for x, y, z in segment_points]
+            lines.append(
+                f'<polyline class="{segment_class}" data-pass="{escape(toolpath_pass.id)}" '
+                f'data-move-kind="{segment_kind}" data-segment="{segment_index}" '
+                f'stroke="{segment_color}" points="{_svg_polyline(segment_screen_points, close=False)}" />'
+            )
+            lines.append(
+                f'<polyline class="{iso_segment_class}" data-pass="{escape(toolpath_pass.id)}-iso" '
+                f'data-move-kind="{segment_kind}" data-segment="{segment_index}" '
+                f'stroke="{segment_color}" points="{_svg_polyline(segment_iso_points, close=False)}" />'
+            )
         if screen_points:
             x, y = screen_points[0]
             lines.append(f'<circle class="dot" cx="{x:.2f}" cy="{y:.2f}" r="5" fill="{color}" />')
@@ -411,8 +432,18 @@ def _toolpath_preview_row_svg(
     return [line for line in lines if line]
 
 
-def _toolpath_xyz_points(toolpath_pass: ToolpathPass) -> list[tuple[float, float, float]]:
-    points: list[tuple[float, float, float]] = []
+def _move_preview_color(base_color: str, segment_kind: str) -> str:
+    if segment_kind != "arc":
+        return base_color
+    if base_color == "#dc2626":
+        return "#fb7185"
+    if base_color == "#2563eb":
+        return "#38bdf8"
+    return "#a78bfa"
+
+
+def _toolpath_render_segments(toolpath_pass: ToolpathPass) -> list[tuple[str, list[tuple[float, float, float]]]]:
+    segments: list[tuple[str, list[tuple[float, float, float]]]] = []
     current_x: float | None = None
     current_y: float | None = None
     current_z: float | None = None
@@ -427,9 +458,21 @@ def _toolpath_xyz_points(toolpath_pass: ToolpathPass) -> list[tuple[float, float
                 current_z = move.z
             cutting = False
             continue
+        previous = (current_x, current_y, current_z)
+        if isinstance(move, ArcMove):
+            if None in previous:
+                continue
+            start = (previous[0], previous[1], previous[2])
+            z = move.z if move.z is not None else previous[2]
+            arc_points = _arc_move_points(start, move, z)
+            segments.append(("arc", arc_points))
+            current_x = move.x
+            current_y = move.y
+            current_z = z
+            cutting = True
+            continue
         if not isinstance(move, LineMove):
             continue
-        previous = (current_x, current_y, current_z)
         if move.x is not None:
             current_x = move.x
         if move.y is not None:
@@ -438,14 +481,37 @@ def _toolpath_xyz_points(toolpath_pass: ToolpathPass) -> list[tuple[float, float
             current_z = move.z
         if current_x is None or current_y is None or current_z is None:
             continue
-        if not cutting:
-            if previous[0] is not None and previous[1] is not None and previous[2] is not None:
-                points.append((previous[0], previous[1], previous[2]))
-            points.append((current_x, current_y, current_z))
-            cutting = True
-            continue
-        points.append((current_x, current_y, current_z))
-    return points
+        start = (previous[0], previous[1], previous[2]) if None not in previous else (current_x, current_y, current_z)
+        segments.append(("line", [start, (current_x, current_y, current_z)]))
+        cutting = True
+    return segments
+
+
+def _arc_move_points(
+    start: tuple[float, float, float],
+    move: ArcMove,
+    z: float,
+    segments: int = 18,
+) -> list[tuple[float, float, float]]:
+    center_x = start[0] + move.i
+    center_y = start[1] + move.j
+    start_angle = math.atan2(start[1] - center_y, start[0] - center_x)
+    end_angle = math.atan2(move.y - center_y, move.x - center_x)
+    sweep = end_angle - start_angle
+    if move.direction == "ccw" and sweep <= 0:
+        sweep += 2 * math.pi
+    if move.direction == "cw" and sweep >= 0:
+        sweep -= 2 * math.pi
+    steps = max(3, math.ceil(abs(sweep) / (math.pi / 18)))
+    radius = math.hypot(start[0] - center_x, start[1] - center_y)
+    return [
+        (
+            center_x + math.cos(start_angle + sweep * index / steps) * radius,
+            center_y + math.sin(start_angle + sweep * index / steps) * radius,
+            z,
+        )
+        for index in range(steps + 1)
+    ]
 
 
 def _arrow_markers(points: list[tuple[float, float]], color: str) -> list[str]:
@@ -510,8 +576,7 @@ def _closed_line_moves(
         {"type": "rapid", "x": start[0], "y": start[1], "z": safe_z},
         {"type": "line", "z": z_bottom, "feed": feed},
     ]
-    moves.extend({"type": "line", "x": x, "y": y, "z": z_bottom, "feed": feed} for x, y in points[1:])
-    moves.append({"type": "line", "x": start[0], "y": start[1], "z": z_bottom, "feed": feed})
+    moves.extend(_contour_feed_moves(points, z_bottom, feed))
     return moves
 
 
@@ -528,8 +593,7 @@ def _layered_line_moves(
     for depth in depths:
         z_bottom = -depth
         moves.append({"type": "line", "z": z_bottom, "feed": feed})
-        moves.extend({"type": "line", "x": x, "y": y, "z": z_bottom, "feed": feed} for x, y in points[1:])
-        moves.append({"type": "line", "x": start[0], "y": start[1], "z": z_bottom, "feed": feed})
+        moves.extend(_contour_feed_moves(points, z_bottom, feed))
     return moves
 
 
@@ -560,6 +624,139 @@ def _spiral_line_moves(
         z_bottom = -depths[-1]
         moves.extend({"type": "line", "x": x, "y": y, "z": z_bottom, "feed": feed} for x, y in closed_points[1:])
     return moves
+
+
+def _contour_feed_moves(
+    points: list[tuple[float, float]],
+    z_bottom: float,
+    feed: float,
+) -> list[dict]:
+    if len(points) < 2:
+        return []
+    return [
+        _segment_to_move(segment, z_bottom, feed)
+        for segment in _recover_arc_segments(points)
+    ]
+
+
+def _segment_to_move(segment: dict, z_bottom: float, feed: float) -> dict:
+    if segment["type"] == "arc":
+        start = segment["start"]
+        center = segment["center"]
+        return {
+            "type": "arc",
+            "direction": segment["direction"],
+            "x": segment["end"][0],
+            "y": segment["end"][1],
+            "z": z_bottom,
+            "i": center[0] - start[0],
+            "j": center[1] - start[1],
+            "feed": feed,
+        }
+    return {"type": "line", "x": segment["end"][0], "y": segment["end"][1], "z": z_bottom, "feed": feed}
+
+
+def _recover_arc_segments(
+    points: list[tuple[float, float]],
+    tolerance: float = 1e-4,
+    min_points: int = 5,
+) -> list[dict]:
+    closed_points = [*points, points[0]]
+    segments: list[dict] = []
+    index = 0
+    while index < len(closed_points) - 1:
+        arc = _detect_arc_at(closed_points, index, tolerance, min_points)
+        if arc is not None:
+            segments.append(arc)
+            index = arc["end_index"]
+            continue
+        segments.append({"type": "line", "start": closed_points[index], "end": closed_points[index + 1]})
+        index += 1
+    return segments
+
+
+def _detect_arc_at(
+    points: list[tuple[float, float]],
+    start_index: int,
+    tolerance: float,
+    min_points: int,
+) -> dict | None:
+    best: dict | None = None
+    for end_index in range(start_index + min_points - 1, len(points)):
+        candidate_points = points[start_index : end_index + 1]
+        arc = _fit_arc(candidate_points, tolerance)
+        if arc is None:
+            if best is not None:
+                break
+            return None
+        best = {
+            **arc,
+            "type": "arc",
+            "start": points[start_index],
+            "end": points[end_index],
+            "end_index": end_index,
+        }
+    return best
+
+
+def _fit_arc(points: list[tuple[float, float]], tolerance: float) -> dict | None:
+    first = points[0]
+    middle = points[len(points) // 2]
+    last = points[-1]
+    center = _circle_center(first, middle, last)
+    if center is None:
+        return None
+    radius = math.hypot(first[0] - center[0], first[1] - center[1])
+    if radius <= tolerance:
+        return None
+    errors = [abs(math.hypot(point[0] - center[0], point[1] - center[1]) - radius) for point in points]
+    if max(errors) > tolerance * 2 or sum(errors) / len(errors) > tolerance:
+        return None
+    direction = _arc_direction(points, center)
+    if direction is None:
+        return None
+    return {"center": center, "radius": radius, "direction": direction}
+
+
+def _circle_center(
+    first: tuple[float, float],
+    second: tuple[float, float],
+    third: tuple[float, float],
+) -> tuple[float, float] | None:
+    ax, ay = first
+    bx, by = second
+    cx, cy = third
+    determinant = 2 * (ax * (by - cy) + bx * (cy - ay) + cx * (ay - by))
+    if abs(determinant) <= 1e-12:
+        return None
+    ux = (
+        (ax * ax + ay * ay) * (by - cy)
+        + (bx * bx + by * by) * (cy - ay)
+        + (cx * cx + cy * cy) * (ay - by)
+    ) / determinant
+    uy = (
+        (ax * ax + ay * ay) * (cx - bx)
+        + (bx * bx + by * by) * (ax - cx)
+        + (cx * cx + cy * cy) * (bx - ax)
+    ) / determinant
+    return ux, uy
+
+
+def _arc_direction(points: list[tuple[float, float]], center: tuple[float, float]) -> str | None:
+    signed = 0.0
+    previous_angle = math.atan2(points[0][1] - center[1], points[0][0] - center[0])
+    for point in points[1:]:
+        angle = math.atan2(point[1] - center[1], point[0] - center[0])
+        delta = angle - previous_angle
+        while delta <= -math.pi:
+            delta += 2 * math.pi
+        while delta > math.pi:
+            delta -= 2 * math.pi
+        signed += delta
+        previous_angle = angle
+    if abs(signed) <= 1e-9:
+        return None
+    return "ccw" if signed > 0 else "cw"
 
 
 def _depth_passes(depth: float, step: float, hard_step: float | None = None) -> list[float]:
