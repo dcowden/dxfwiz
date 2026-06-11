@@ -940,6 +940,11 @@ def _planning_request(
                 "finishing_allowance": planner.defaults.finishing_allowance,
                 "cut_deeper_than_stock": planner.defaults.cut_deeper_than_stock,
                 "screw_spacing": planner.defaults.screw_spacing,
+                "min_screw_distance": planner.defaults.min_screw_distance,
+                "fixups": {
+                    name: bool(setting["enabled"])
+                    for name, setting in planner.defaults.fixups.model_dump().items()
+                },
             },
         }
     )

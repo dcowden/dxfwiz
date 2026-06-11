@@ -1,0 +1,14 @@
+max_errors: 2
+max_warnings: 5
+max_planning_errors: 0
+max_planning_warnings: 5
+planning_errors:
+  max_severity: 0
+planning_warnings:
+  does_not_have_codes: [W2009]
+  max_severity: 2
+errors:
+  has_codes: [E3001]
+  max_severity: 3
+warnings:
+  max_severity: 2

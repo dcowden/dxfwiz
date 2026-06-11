@@ -310,6 +310,17 @@ System planner advice:
 - User advice from `planner.yaml` is combined with system advice when generating a plan.
 - System advice is not a source of missing inputs; it is used to guide plan generation and produce warnings/errors.
 
+Planner issue philosophy:
+
+- Errors block plan or toolpath generation until the user changes inputs, geometry, tools, or planner settings.
+- Warnings indicate the system made a reasonable choice, but the user should review the result before cutting.
+- Some errors can be converted into warnings by applying explicit planner fixups.
+- Fixups must be configurable in `planner.yaml` under `defaults.fixups`.
+- Each fixup has a slug-friendly name, an English description, and a boolean value.
+- A fixup should only run when the code can prove the adjusted operation is still physically machinable.
+- When a fixup is applied, emit a warning that names the original problem and the chosen fix.
+- Example: if a selected tool can finish a circular hole but cannot leave the requested roughing allowance, the planner/toolpath generator may skip roughing for that hole and emit a warning such as "Skipped roughing pass to accommodate selected tool." If the tool still cannot fit at finishing diameter, keep the original error.
+
 ## Service Architecture
 
 Use service objects for workflow steps. The current UI has a `ProjectService` that:
@@ -349,6 +360,8 @@ Current direction:
 - Use Shapely and pyclipper/Clipper-style algorithms where appropriate.
 - Use Kiri:Moto as a reference for toolpath behavior, especially pocketing and ramping.
 - Be careful with licenses. GPL code used only behind a web app generally does not trigger distribution the way AGPL does, but this must be considered carefully if code is reused or ported.
+- Use a NumPy-backed dexel simulator for material-removal testing. Internally, `actual_depth` is positive depth removed below stock top. The simulator must keep `expected_depth`, `actual_depth`, `cut_count`, and `last_operation_id`, and its request/response boundary must stay stateless so it can later run behind a separate service.
+- Static simulator previews should be generated as output artifacts by tests, not by the service layer. Initial previews use top and isometric views; future UI work can reuse the same grid/snapshot data in Three.js.
 
 ## Testing
 
@@ -365,7 +378,7 @@ Test layout:
 
 - source under `src/dxfwiz`
 - tests under `tests`
-- real DXF fixtures under `tests/dxf_clean/<case>/`
+- real and synthetic DXF integration fixtures under `tests/integration_tests/<case>/`
 - each fixture case has its own `machine.yaml`
 - generated integration outputs under `tests/output/<case>/`
 - `tests/output/` is ignored by git

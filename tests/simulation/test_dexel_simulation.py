@@ -1,0 +1,267 @@
+from pathlib import Path
+
+import numpy as np
+import pytest
+
+from dxfwiz.schemas import MachineFile
+from dxfwiz.simulation import (
+    DexelGrid,
+    DexelSimulationRequest,
+    SimulationBounds,
+    SimulationSettings,
+    SimulationStock,
+    render_dexel_preview_png,
+    simulate_toolpath,
+)
+from dxfwiz.toolpaths.model import ToolpathPass, ToolpathPlan
+
+
+OUTPUT_DIR = Path(__file__).resolve().parents[1] / "output" / "simulation"
+
+
+def test_dexel_grid_initializes_expected_and_actual_depth_arrays():
+    grid = DexelGrid.create(
+        _stock(),
+        SimulationSettings(xy_spacing=0.1),
+        minimum_tool_diameter=0.25,
+    )
+
+    grid.expected_rectangle(0.25, 0.25, 0.75, 0.75, 0.125)
+    grid.expected_circle((1.2, 1.2), 0.2, 0.2)
+
+    assert grid.actual_depth.shape == grid.expected_depth.shape
+    assert grid.actual_depth.max() == pytest.approx(0)
+    assert grid.expected_depth.max() == pytest.approx(0.2)
+    assert grid.operation_index("op-a") == 0
+    assert grid.operation_index("op-a") == 0
+
+
+def test_linear_feed_removes_swept_capsule_and_tracks_last_operation():
+    run = simulate_toolpath(
+        _request(
+            [
+                _pass(
+                    "op-line",
+                    [
+                        {"type": "rapid", "x": 0.25, "y": 0.5, "z": 0.25},
+                        {"type": "line", "z": -0.1, "feed": 10},
+                        {"type": "line", "x": 1.75, "y": 0.5, "z": -0.1, "feed": 40},
+                    ],
+                )
+            ],
+            expected=[{"type": "rectangle", "min_x": 0.25, "min_y": 0.35, "max_x": 1.75, "max_y": 0.65, "depth": 0.1}],
+        )
+    )
+
+    assert run.response.errors == []
+    assert run.response.metrics.removed_cells > 0
+    assert run.response.metrics.max_actual_depth == pytest.approx(0.1)
+    assert np.count_nonzero(run.grid.last_operation_id == 0) > 0
+
+
+def test_arc_feed_removes_curved_sweep():
+    run = simulate_toolpath(
+        _request(
+            [
+                _pass(
+                    "op-arc",
+                    [
+                        {"type": "rapid", "x": 1.5, "y": 1.0, "z": 0.25},
+                        {"type": "line", "z": -0.1, "feed": 10},
+                        {"type": "arc", "direction": "ccw", "x": 0.5, "y": 1.0, "z": -0.1, "i": -0.5, "j": 0.0, "feed": 40},
+                    ],
+                )
+            ],
+            expected=[{"type": "circle", "center_x": 1.0, "center_y": 1.0, "radius": 0.65, "depth": 0.1}],
+        )
+    )
+
+    assert run.response.errors == []
+    assert run.response.metrics.removed_cells > 0
+    assert run.response.metrics.max_actual_depth == pytest.approx(0.1)
+
+
+def test_rapid_collision_is_reported_along_path():
+    run = simulate_toolpath(
+        _request(
+            [
+                _pass(
+                    "op-rapid",
+                    [
+                        {"type": "rapid", "x": 0.25, "y": 1.0, "z": 0.25},
+                        {"type": "rapid", "x": 1.75, "y": 1.0, "z": -0.05},
+                    ],
+                )
+            ]
+        )
+    )
+
+    assert [error.code for error in run.response.errors] == ["E3002"]
+    assert run.response.metrics.rapid_collision_count == 1
+    assert run.response.metrics.unsafe_rapid_count == 1
+
+
+def test_overlapping_pocket_style_paths_track_recut_cells_and_air_moves():
+    run = simulate_toolpath(
+        _request(
+            [
+                _pass(
+                    "op-pocket",
+                    [
+                        {"type": "rapid", "x": 0.3, "y": 0.4, "z": 0.25},
+                        {"type": "line", "z": -0.12, "feed": 10},
+                        {"type": "line", "x": 1.7, "y": 0.4, "z": -0.12, "feed": 40},
+                        {"type": "line", "x": 0.3, "y": 0.55, "z": -0.12, "feed": 40},
+                        {"type": "line", "x": 1.7, "y": 0.7, "z": -0.12, "feed": 40},
+                        {"type": "line", "x": 0.3, "y": 0.85, "z": -0.12, "feed": 40},
+                        {"type": "line", "x": 1.7, "y": 1.0, "z": -0.12, "feed": 40},
+                        {"type": "line", "x": 0.3, "y": 1.15, "z": -0.12, "feed": 40},
+                    ],
+                )
+            ],
+            expected=[{"type": "rectangle", "min_x": 0.2, "min_y": 0.3, "max_x": 1.8, "max_y": 1.25, "depth": 0.12}],
+        )
+    )
+
+    assert run.response.errors == []
+    assert run.response.metrics.recut_cells > 0
+    assert run.response.metrics.max_cut_count > 1
+    assert run.response.metrics.removed_cells > 0
+
+
+def test_ball_end_profile_removes_less_at_tool_edge_than_flat_profile():
+    flat = DexelGrid.create(_stock(), SimulationSettings(xy_spacing=0.025), minimum_tool_diameter=0.25)
+    ball = DexelGrid.create(_stock(), SimulationSettings(xy_spacing=0.025), minimum_tool_diameter=0.25)
+
+    flat.remove_circle((1.0, 1.0), 0.125, 0.1, "flat")
+    ball.remove_circle((1.0, 1.0), 0.125, 0.1, "ball", profile=_ball_profile())
+
+    assert ball.actual_depth.max() == pytest.approx(flat.actual_depth.max(), abs=0.005)
+    assert ball.actual_depth.sum() < flat.actual_depth.sum()
+
+
+def test_preview_renderer_returns_png_bytes_and_tests_write_files():
+    run = simulate_toolpath(
+        _request(
+            [
+                _pass(
+                    "op-preview",
+                    [
+                        {"type": "rapid", "x": 0.25, "y": 0.5, "z": 0.25},
+                        {"type": "line", "z": -0.1, "feed": 10},
+                        {"type": "line", "x": 1.75, "y": 0.5, "z": -0.1, "feed": 40},
+                    ],
+                )
+            ],
+            expected=[{"type": "rectangle", "min_x": 0.2, "min_y": 0.35, "max_x": 1.8, "max_y": 0.65, "depth": 0.1}],
+        )
+    )
+    initial_png = render_dexel_preview_png(
+        run.grid,
+        "test_preview_renderer initial",
+        depth=np.zeros_like(run.grid.actual_depth),
+    )
+    final_png = render_dexel_preview_png(run.grid, "test_preview_renderer final")
+
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    initial_path = OUTPUT_DIR / "test_dexel_simulation_initial.png"
+    final_path = OUTPUT_DIR / "test_dexel_simulation_final.png"
+    initial_path.write_bytes(initial_png)
+    final_path.write_bytes(final_png)
+
+    assert initial_path.stat().st_size > 1000
+    assert final_path.stat().st_size > 1000
+
+
+def _stock() -> SimulationStock:
+    return SimulationStock(
+        bounds=SimulationBounds(min_x=0, min_y=0, max_x=2, max_y=2),
+        thickness=0.25,
+    )
+
+
+def _request(passes: list[ToolpathPass], expected: list[dict] | None = None) -> DexelSimulationRequest:
+    return DexelSimulationRequest.model_validate(
+        {
+            "machine": _machine().model_dump(mode="json"),
+            "toolpath_plan": ToolpathPlan(units="in", coordinate_system="G55", passes=passes).model_dump(mode="json"),
+            "stock": _stock().model_dump(mode="json"),
+            "settings": {"xy_spacing": 0.05, "z_spacing": 0.02, "preview": True},
+            "expected_removals": expected or [],
+        }
+    )
+
+
+def _pass(operation_id: str, moves: list[dict]) -> ToolpathPass:
+    return ToolpathPass.model_validate(
+        {
+            "id": f"{operation_id}-pass",
+            "operation_id": operation_id,
+            "entity": "e1",
+            "kind": "pocket_clear",
+            "tool": "t1",
+            "tool_diameter": 0.25,
+            "feed_rate": 40,
+            "z_bottom": -0.1,
+            "moves": moves,
+        }
+    )
+
+
+def _machine() -> MachineFile:
+    return MachineFile.model_validate(
+        {
+            "schema_version": "1.0",
+            "units": {"length": "in", "speed": "in/min"},
+            "machine": {
+                "name": "Simulation Test Router",
+                "type": "router",
+                "axes": 3,
+                "max_tools": 1,
+                "clear_z": 0.25,
+                "workholding": ["tape"],
+                "part_holding": [],
+                "work_envelope": {
+                    "x": {"min": 0, "max": 24},
+                    "y": {"min": 0, "max": 24},
+                    "z": {"min": -3, "max": 0},
+                },
+                "coordinate_system": {
+                    "x_positive": "right",
+                    "y_positive": "up",
+                    "origin": "bottom_left",
+                },
+                "spindle": {"type": "er11", "max_rpm": 24000},
+            },
+            "tools": [
+                {
+                    "id": "t1",
+                    "description": "1/4 flat endmill",
+                    "end_type": "flat",
+                    "flute_spiral": "upcut",
+                    "diameter": 0.25,
+                    "flutes": 2,
+                    "speed": 18000,
+                    "feed_rate": 40,
+                    "plunge_rate": 10,
+                },
+                {
+                    "id": "tb",
+                    "description": "1/4 ball endmill",
+                    "end_type": "ball",
+                    "flute_spiral": "upcut",
+                    "diameter": 0.25,
+                    "flutes": 2,
+                    "speed": 18000,
+                    "feed_rate": 40,
+                    "plunge_rate": 10,
+                },
+            ],
+        }
+    )
+
+
+def _ball_profile():
+    from dxfwiz.simulation.model import ToolProfile
+
+    return ToolProfile(diameter=0.25, end_type="ball")

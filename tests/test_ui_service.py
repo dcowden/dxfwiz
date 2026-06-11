@@ -15,7 +15,7 @@ def test_project_service_creates_project_artifacts(tmp_path):
         machine_yaml=ROOT / "examples" / "machine.yaml",
         planner_yaml=ROOT / "examples" / "planner.yaml",
     )
-    source = ROOT / "tests" / "dxf_clean" / "2xintake" / "2xintakev3_and_2xkickerv1.dxf"
+    source = ROOT / "tests" / "integration_tests" / "2xintake" / "2xintakev3_and_2xkickerv1.dxf"
 
     artifacts = service.create_project_from_upload(source.name, source.read_bytes())
 
@@ -35,7 +35,7 @@ def test_render_display_includes_machine_and_geometry_layers(tmp_path):
         machine_yaml=ROOT / "examples" / "machine.yaml",
         planner_yaml=ROOT / "examples" / "planner.yaml",
     )
-    source = ROOT / "tests" / "dxf_clean" / "2xintake" / "2xintakev3_and_2xkickerv1.dxf"
+    source = ROOT / "tests" / "integration_tests" / "2xintake" / "2xintakev3_and_2xkickerv1.dxf"
     artifacts = service.create_project_from_upload(source.name, source.read_bytes())
 
     html = render_display(service.load_machine(), artifacts)

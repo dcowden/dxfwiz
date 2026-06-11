@@ -2,7 +2,18 @@ import pytest
 from pydantic import TypeAdapter, ValidationError
 
 from dxfwiz.schemas.common import Point2D
-from dxfwiz.toolpaths.model import ArcMove, SourceArcSegment, SourceLineSegment, SourcePath, ToolpathMove, ToolpathPass, ToolpathPlan
+from dxfwiz.toolpaths.model import (
+    ArcMove,
+    CoordinateSystemCommand,
+    SourceArcSegment,
+    SourceLineSegment,
+    SourcePath,
+    SpindleSpeedCommand,
+    ToolpathMove,
+    ToolpathPass,
+    ToolpathPlan,
+    WarningCommand,
+)
 
 
 def test_source_path_preserves_lines_and_arcs():
@@ -58,11 +69,34 @@ def test_toolpath_pass_carries_assertion_metadata_and_postable_moves():
     assert toolpath_pass.moves[2].z == pytest.approx(-0.08)
 
 
-def test_move_union_rejects_spindle_on_without_rpm():
+def test_move_union_accepts_neutral_setup_and_spindle_commands():
     adapter = TypeAdapter(ToolpathMove)
 
+    commands = [
+        adapter.validate_python({"type": "units", "length": "in"}),
+        adapter.validate_python({"type": "distance_mode", "mode": "absolute"}),
+        adapter.validate_python({"type": "coordinate_system", "code": "G55"}),
+        adapter.validate_python({"type": "spindle_speed", "rpm": 18000}),
+        adapter.validate_python({"type": "spindle", "state": "on"}),
+        adapter.validate_python({"type": "spindle", "state": "off"}),
+        adapter.validate_python({"type": "warning", "text": "verify tabs"}),
+        adapter.validate_python({"type": "comment", "text": "begin program"}),
+    ]
+
+    assert isinstance(commands[2], CoordinateSystemCommand)
+    assert isinstance(commands[3], SpindleSpeedCommand)
+    assert isinstance(commands[6], WarningCommand)
+
+
+def test_linear_and_rapid_moves_require_at_least_one_axis_but_axes_are_individually_optional():
+    adapter = TypeAdapter(ToolpathMove)
+
+    assert adapter.validate_python({"type": "line", "z": -0.125}).z == pytest.approx(-0.125)
+    assert adapter.validate_python({"type": "rapid", "x": 1.0}).x == pytest.approx(1.0)
     with pytest.raises(ValidationError):
-        adapter.validate_python({"type": "spindle", "state": "on"})
+        adapter.validate_python({"type": "line", "feed": 20})
+    with pytest.raises(ValidationError):
+        adapter.validate_python({"type": "rapid"})
 
 
 def test_toolpath_plan_groups_source_paths_and_passes():

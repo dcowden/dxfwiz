@@ -5,7 +5,7 @@ from html import escape
 from statistics import median
 from pathlib import Path
 
-from shapely.geometry import LineString, Point, Polygon
+from shapely.geometry import LineString, Point, Polygon, box
 
 from dxfwiz.schemas.common import Point2D
 from dxfwiz.schemas.job import ContourOperation
@@ -35,6 +35,7 @@ def contour_operation_to_toolpaths(
     """
     passes: list[ToolpathPass] = []
     total_depth = operation.depth + operation.extra_depth
+    feed = operation.feed_rate or tool.feed_rate
     if operation.roughing.enabled:
         rough_offset = _offset_distance(operation.offset, tool.diameter, operation.roughing.side_allowance)
         rough_points = offset_source_path(source_path, operation.offset, rough_offset)
@@ -64,6 +65,7 @@ def contour_operation_to_toolpaths(
                         kind="rough_contour",
                         tool=operation.tool,
                         tool_diameter=tool.diameter,
+                        feed_rate=feed,
                         z_top=0.0,
                         z_bottom=z_bottom,
                         source_path=source_path.id,
@@ -74,8 +76,10 @@ def contour_operation_to_toolpaths(
                             rough_points,
                             depths,
                             safe_z,
-                            operation.feed_rate or tool.feed_rate,
+                            feed,
                             bottom_cleanup=not has_finish_contour,
+                            operation=operation,
+                            tool=tool,
                         ),
                     )
                 )
@@ -89,13 +93,14 @@ def contour_operation_to_toolpaths(
                     kind="rough_contour",
                     tool=operation.tool,
                     tool_diameter=tool.diameter,
+                    feed_rate=feed,
                     z_top=0.0,
                     z_bottom=z_bottom,
                     source_path=source_path.id,
                     offset_side=operation.offset,
                     offset_distance=abs(rough_offset),
                     milling_direction=operation.roughing.milling_direction,
-                    moves=_layered_line_moves(rough_points, depths, safe_z, operation.feed_rate or tool.feed_rate),
+                    moves=_layered_line_moves(rough_points, depths, safe_z, feed, operation, tool),
                 )
             )
 
@@ -125,13 +130,14 @@ def contour_operation_to_toolpaths(
                     kind="finish_contour",
                     tool=operation.tool,
                     tool_diameter=tool.diameter,
+                    feed_rate=feed,
                     z_top=0.0,
                     z_bottom=z_bottom,
                     source_path=source_path.id,
                     offset_side=operation.offset,
                     offset_distance=abs(finish_offset),
                     milling_direction=operation.finishing.milling_direction,
-                    moves=_closed_line_moves(finish_points, z_bottom, safe_z, operation.feed_rate or tool.feed_rate),
+                    moves=_closed_line_moves(finish_points, z_bottom, safe_z, feed, operation, tool),
                 )
             )
 
@@ -229,6 +235,7 @@ def _unmachinable_contour_pass(
         kind=kind,
         tool=operation.tool,
         tool_diameter=tool.diameter,
+        feed_rate=operation.feed_rate or tool.feed_rate,
         z_top=0.0,
         z_bottom=z_bottom,
         source_path=source_path.id,
@@ -289,6 +296,7 @@ def render_toolpath_preview_sheet_svg(
         ".path { fill: none; stroke-width: 2.5; }",
         ".path-iso { fill: none; stroke-width: 2.5; }",
         ".arc-path { stroke-width: 3.5; }",
+        ".rapid-path { stroke: #6b7280; stroke-width: 1.8; stroke-dasharray: 6 5; opacity: 0.8; }",
         ".finish { stroke-dasharray: 8 5; }",
         ".dot { stroke: white; stroke-width: 2; }",
         ".panel-label { font-weight: 700; fill: #374151; }",
@@ -402,8 +410,8 @@ def _toolpath_preview_row_svg(
         iso_screen_points = [iso_screen(point) for point in iso_points]
         for segment_index, (segment_kind, segment_points) in enumerate(segments, start=1):
             segment_color = _move_preview_color(color, segment_kind)
-            segment_class = f"{css_class} arc-path" if segment_kind == "arc" else css_class
-            iso_segment_class = f"{iso_css_class} arc-path" if segment_kind == "arc" else iso_css_class
+            segment_class = "rapid-path" if segment_kind == "rapid" else (f"{css_class} arc-path" if segment_kind == "arc" else css_class)
+            iso_segment_class = "rapid-path" if segment_kind == "rapid" else (f"{iso_css_class} arc-path" if segment_kind == "arc" else iso_css_class)
             segment_screen_points = [screen((x, y)) for x, y, _z in segment_points]
             segment_iso_points = [iso_screen(_iso_project(x, y, z)) for x, y, z in segment_points]
             lines.append(
@@ -433,6 +441,8 @@ def _toolpath_preview_row_svg(
 
 
 def _move_preview_color(base_color: str, segment_kind: str) -> str:
+    if segment_kind == "rapid":
+        return "#6b7280"
     if segment_kind != "arc":
         return base_color
     if base_color == "#dc2626":
@@ -450,12 +460,24 @@ def _toolpath_render_segments(toolpath_pass: ToolpathPass) -> list[tuple[str, li
     cutting = False
     for move in toolpath_pass.moves:
         if isinstance(move, RapidMove):
+            previous = (current_x, current_y, current_z)
+            next_x = current_x
+            next_y = current_y
+            next_z = current_z
             if move.x is not None:
-                current_x = move.x
+                next_x = move.x
             if move.y is not None:
-                current_y = move.y
+                next_y = move.y
             if move.z is not None:
-                current_z = move.z
+                next_z = move.z
+            if None not in previous and next_x is not None and next_y is not None and next_z is not None:
+                next_point = (next_x, next_y, next_z)
+                previous_point = (previous[0], previous[1], previous[2])
+                if next_point != previous_point:
+                    segments.append(("rapid", [previous_point, next_point]))
+            current_x = next_x
+            current_y = next_y
+            current_z = next_z
             cutting = False
             continue
         previous = (current_x, current_y, current_z)
@@ -568,6 +590,8 @@ def _closed_line_moves(
     z_bottom: float,
     safe_z: float,
     feed: float,
+    operation: ContourOperation | None = None,
+    tool: Tool | None = None,
 ) -> list[dict]:
     if not points:
         return []
@@ -576,7 +600,7 @@ def _closed_line_moves(
         {"type": "rapid", "x": start[0], "y": start[1], "z": safe_z},
         {"type": "line", "z": z_bottom, "feed": feed},
     ]
-    moves.extend(_contour_feed_moves(points, z_bottom, feed))
+    moves.extend(_contour_feed_moves_with_tabs(points, z_bottom, feed, operation, tool))
     return moves
 
 
@@ -585,6 +609,8 @@ def _layered_line_moves(
     depths: list[float],
     safe_z: float,
     feed: float,
+    operation: ContourOperation | None = None,
+    tool: Tool | None = None,
 ) -> list[dict]:
     if not points or not depths:
         return []
@@ -593,7 +619,7 @@ def _layered_line_moves(
     for depth in depths:
         z_bottom = -depth
         moves.append({"type": "line", "z": z_bottom, "feed": feed})
-        moves.extend(_contour_feed_moves(points, z_bottom, feed))
+        moves.extend(_contour_feed_moves_with_tabs(points, z_bottom, feed, operation, tool))
     return moves
 
 
@@ -603,9 +629,13 @@ def _spiral_line_moves(
     safe_z: float,
     feed: float,
     bottom_cleanup: bool,
+    operation: ContourOperation | None = None,
+    tool: Tool | None = None,
 ) -> list[dict]:
     if not points or not depths:
         return []
+    if _has_active_tabs(operation):
+        return _tabbed_spiral_line_moves(points, depths, safe_z, feed, operation, tool, bottom_cleanup)
     start = points[0]
     closed_points = [*points, start]
     moves: list[dict] = [
@@ -637,6 +667,232 @@ def _contour_feed_moves(
         _segment_to_move(segment, z_bottom, feed)
         for segment in _recover_arc_segments(points)
     ]
+
+
+def _contour_feed_moves_with_tabs(
+    points: list[tuple[float, float]],
+    z_bottom: float,
+    feed: float,
+    operation: ContourOperation | None,
+    tool: Tool | None,
+) -> list[dict]:
+    if not _tabs_affect_depth(operation, z_bottom):
+        return _contour_feed_moves(points, z_bottom, feed)
+    intervals = _tab_intervals(points, operation, tool)
+    if not intervals:
+        return _contour_feed_moves(points, z_bottom, feed)
+    return _tabbed_contour_feed_moves(
+        points=points,
+        z_bottom=z_bottom,
+        feed=feed,
+        intervals=intervals,
+        tab_top=_tab_top(operation),
+        ramping=operation.ramping,
+        tool_radius=(tool.diameter / 2 if tool else 0.0),
+    )
+
+
+def _tabbed_spiral_line_moves(
+    points: list[tuple[float, float]],
+    depths: list[float],
+    safe_z: float,
+    feed: float,
+    operation: ContourOperation | None,
+    tool: Tool | None,
+    bottom_cleanup: bool,
+) -> list[dict]:
+    start = points[0]
+    moves: list[dict] = [
+        {"type": "rapid", "x": start[0], "y": start[1], "z": safe_z},
+        {"type": "line", "z": 0.0, "feed": feed},
+    ]
+    for depth in depths:
+        z_bottom = -depth
+        moves.extend(_contour_feed_moves_with_tabs(points, z_bottom, feed, operation, tool))
+    if bottom_cleanup:
+        z_bottom = -depths[-1]
+        moves.extend(_contour_feed_moves_with_tabs(points, z_bottom, feed, operation, tool))
+    return moves
+
+
+def _tabbed_contour_feed_moves(
+    points: list[tuple[float, float]],
+    z_bottom: float,
+    feed: float,
+    intervals: list[tuple[float, float]],
+    tab_top: float,
+    ramping: bool,
+    tool_radius: float,
+) -> list[dict]:
+    line = _closed_linestring(points)
+    total = line.length
+    moves: list[dict] = []
+    current = 0.0
+    for start, end in intervals:
+        if start <= current + 1e-9:
+            current = max(current, end)
+            continue
+        moves.extend(_moves_along_line(line, current, start, z_bottom, feed))
+        if ramping:
+            ramp_length = max(end - start, tool_radius * 3, total * 0.015)
+            ramp_end = min(total, end + ramp_length)
+            moves.append({"type": "line", "z": tab_top, "feed": feed})
+            moves.extend(_moves_along_line(line, start, ramp_end, tab_top, feed))
+            moves.extend(_ramp_back_moves(line, ramp_end, end, tab_top, z_bottom, feed))
+        else:
+            moves.append({"type": "line", "z": tab_top, "feed": feed})
+            moves.extend(_moves_along_line(line, start, end, tab_top, feed))
+            moves.append({"type": "line", "z": z_bottom, "feed": feed})
+        current = end
+    moves.extend(_moves_along_line(line, current, total, z_bottom, feed))
+    return moves
+
+
+def _moves_along_line(
+    line: LineString,
+    start_distance: float,
+    end_distance: float,
+    z: float,
+    feed: float,
+) -> list[dict]:
+    stations = _stations_between(line, start_distance, end_distance)
+    return [
+        {"type": "line", "x": point[0], "y": point[1], "z": z, "feed": feed}
+        for point in (_point_at(line, station) for station in stations[1:])
+    ]
+
+
+def _ramp_back_moves(
+    line: LineString,
+    start_distance: float,
+    end_distance: float,
+    start_z: float,
+    end_z: float,
+    feed: float,
+) -> list[dict]:
+    if start_distance <= end_distance + 1e-9:
+        return [{"type": "line", "z": end_z, "feed": feed}]
+    stations = list(reversed(_stations_between(line, end_distance, start_distance)))
+    moves = []
+    travel = max(start_distance - end_distance, 1e-9)
+    for station in stations[1:]:
+        fraction = (start_distance - station) / travel
+        z = start_z + (end_z - start_z) * fraction
+        point = _point_at(line, station)
+        moves.append({"type": "line", "x": point[0], "y": point[1], "z": z, "feed": feed})
+    return moves
+
+
+def _stations_between(line: LineString, start_distance: float, end_distance: float) -> list[float]:
+    start_distance = max(0.0, min(start_distance, line.length))
+    end_distance = max(0.0, min(end_distance, line.length))
+    if end_distance < start_distance:
+        start_distance, end_distance = end_distance, start_distance
+    stations = [start_distance]
+    running = 0.0
+    coords = list(line.coords)
+    for first, second in zip(coords, coords[1:], strict=False):
+        length = math.hypot(second[0] - first[0], second[1] - first[1])
+        running += length
+        if start_distance + 1e-9 < running < end_distance - 1e-9:
+            stations.append(running)
+    if end_distance > start_distance + 1e-9:
+        stations.append(end_distance)
+    return stations
+
+
+def _point_at(line: LineString, distance: float) -> tuple[float, float]:
+    point = line.interpolate(max(0.0, min(distance, line.length)))
+    return float(point.x), float(point.y)
+
+
+def _tab_intervals(
+    points: list[tuple[float, float]],
+    operation: ContourOperation | None,
+    tool: Tool | None,
+) -> list[tuple[float, float]]:
+    if not _has_active_tabs(operation):
+        return []
+    line = _closed_linestring(points)
+    tool_radius = tool.diameter / 2 if tool else 0.0
+    intervals = []
+    for tab in operation.tabs.locations:
+        tab_polygon = _tab_polygon(tab).buffer(tool_radius, join_style=2)
+        intersection = line.intersection(tab_polygon)
+        intervals.extend(_intersection_intervals(line, intersection))
+    return _merge_intervals(intervals, line.length)
+
+
+def _intersection_intervals(line: LineString, geometry) -> list[tuple[float, float]]:
+    if geometry.is_empty:
+        return []
+    if geometry.geom_type == "LineString":
+        coords = list(geometry.coords)
+        if len(coords) < 2:
+            return []
+        distances = [line.project(Point(x, y)) for x, y in coords]
+        return [(min(distances), max(distances))]
+    if geometry.geom_type == "MultiLineString":
+        intervals = []
+        for item in geometry.geoms:
+            intervals.extend(_intersection_intervals(line, item))
+        return intervals
+    if geometry.geom_type == "GeometryCollection":
+        intervals = []
+        for item in geometry.geoms:
+            intervals.extend(_intersection_intervals(line, item))
+        return intervals
+    return []
+
+
+def _merge_intervals(intervals: list[tuple[float, float]], total_length: float) -> list[tuple[float, float]]:
+    cleaned = sorted(
+        (max(0.0, start), min(total_length, end))
+        for start, end in intervals
+        if end - start > 1e-7
+    )
+    if not cleaned:
+        return []
+    merged = [cleaned[0]]
+    for start, end in cleaned[1:]:
+        last_start, last_end = merged[-1]
+        if start <= last_end + 1e-6:
+            merged[-1] = (last_start, max(last_end, end))
+        else:
+            merged.append((start, end))
+    return merged
+
+
+def _closed_linestring(points: list[tuple[float, float]]) -> LineString:
+    return LineString([*points, points[0]])
+
+
+def _tab_polygon(tab) -> Polygon:
+    lower_left = tab.lower_left
+    upper_right = tab.upper_right
+    return box(_point_x(lower_left), _point_y(lower_left), _point_x(upper_right), _point_y(upper_right))
+
+
+def _point_x(point) -> float:
+    return float(point["x"] if isinstance(point, dict) else point.x)
+
+
+def _point_y(point) -> float:
+    return float(point["y"] if isinstance(point, dict) else point.y)
+
+
+def _has_active_tabs(operation: ContourOperation | None) -> bool:
+    return bool(operation and operation.tabs and operation.tabs.enabled and operation.tabs.locations)
+
+
+def _tabs_affect_depth(operation: ContourOperation | None, z_bottom: float) -> bool:
+    return _has_active_tabs(operation) and z_bottom < _tab_top(operation) - 1e-9
+
+
+def _tab_top(operation: ContourOperation | None) -> float:
+    if operation is None or operation.tabs is None:
+        return 0.0
+    return -operation.depth + min(operation.tabs.height, operation.depth)
 
 
 def _segment_to_move(segment: dict, z_bottom: float, feed: float) -> dict:

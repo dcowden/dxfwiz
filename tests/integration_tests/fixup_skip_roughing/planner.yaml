@@ -1,0 +1,58 @@
+schema_version: "1.0"
+units:
+  length: in
+  speed: in/min
+
+planner:
+  name: "Fixup Skip Roughing Planner"
+  description: "Uses a near-size tool so helical roughing allowance must be skipped."
+
+defaults:
+  max_tools: 1
+  coordinate_system: G55
+  stock:
+    material: plywood
+    thickness: 0.25
+    z_zero: stock_top
+  origin_location: bottom_left
+  workholding: [tape]
+  part_holding: []
+  default_tool: t3
+  milling_direction: climb
+  finishing_allowance: 0.01
+  cut_deeper_than_stock: 0.01
+  min_screw_distance: 1.1
+  arc_detection:
+    mode: FOR_PLANNING
+    tolerance: 0.002
+  fixups:
+    replace_invalid_default_tool:
+      enabled: true
+      description: "If the requested default tool cannot fit required features, choose the largest fitting tool and warn."
+    normalize_contour_finishing:
+      enabled: true
+      description: "Merge or repair separate/missing contour finishing settings into the contour operation."
+    accept_reduced_tab_count:
+      enabled: true
+      description: "If target tab count cannot be placed on straight segments, use the tabs that can be placed and warn."
+    skip_roughing_when_finish_fits:
+      enabled: true
+      description: "If roughing allowance makes a near-size hole impossible, skip roughing when the selected tool can still finish the feature."
+    fall_back_to_local_planner:
+      enabled: false
+      description: "If AI planning fails, use deterministic local planner and warn the user."
+    downgrade_pocket_to_profile_when_tool_fits_boundary:
+      enabled: false
+      description: "If a pocket cannot be cleared but its boundary can be profiled, convert to an inside contour and warn."
+  tab_settings:
+    enabled: false
+    width: 0.25
+    height: 0.1
+
+operation_advice:
+  workholding: []
+  tools:
+    - "Use the configured default tool for this fixture."
+  geometry: []
+  strategies:
+    - "Use finishing passes when finishing_allowance is greater than zero."

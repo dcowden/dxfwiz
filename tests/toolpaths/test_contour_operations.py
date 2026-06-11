@@ -203,6 +203,120 @@ def test_contour_with_ramping_and_finish_does_not_duplicate_bottom_cleanup():
     PREVIEWS.append(("test_contour_with_ramping_and_finish_does_not_duplicate_bottom_cleanup", source_path, passes))
 
 
+def test_contour_tabs_are_hopped_only_on_depths_below_tab_top_without_ramping():
+    source_path = rectangle_source_path("tabs-e1", width=4, height=2)
+    tool = make_test_tool(diameter=0.25, depth_per_pass=0.1)
+    operation = ContourOperation.model_validate(
+        {
+            "id": "op-tabs",
+            "type": "contour",
+            "entity": "tabs-e1",
+            "tool": "t5",
+            "depth": 0.25,
+            "offset": "on",
+            "ramping": False,
+            "roughing": {
+                "enabled": True,
+                "depth_per_pass": 0.1,
+                "side_allowance": 0.0,
+                "bottom_allowance": 0.0,
+                "milling_direction": "climb",
+            },
+            "finishing": {"enabled": False},
+            "tabs": tabs_on_bottom_edge(height=0.1),
+        }
+    )
+
+    passes = contour_operation_to_toolpaths(operation, source_path, tool, safe_z=0.5)
+
+    z_values = _line_move_z_values(passes[0])
+    assert not any(z == pytest.approx(-0.15) for z in z_values[:6])
+    assert any(z == pytest.approx(-0.15) for z in z_values)
+    deep_segments = _xy_segments_at_z(passes[0], -0.25)
+    assert not any(_segment_crosses_tab_span(segment, 1.38, 2.62) for segment in deep_segments)
+    tab_top_segments = _xy_segments_at_z(passes[0], -0.15)
+    assert any(_segment_crosses_tab_span(segment, 1.38, 2.62) for segment in tab_top_segments)
+    PREVIEWS.append(("test_contour_tabs_are_hopped_only_on_depths_below_tab_top_without_ramping", source_path, passes))
+
+
+def test_contour_tabs_apply_to_finish_passes():
+    source_path = rectangle_source_path("tabs-finish", width=4, height=2)
+    tool = make_test_tool(diameter=0.25, depth_per_pass=0.25)
+    operation = ContourOperation.model_validate(
+        {
+            "id": "op-tabs-finish",
+            "type": "contour",
+            "entity": "tabs-finish",
+            "tool": "t5",
+            "depth": 0.25,
+            "offset": "on",
+            "roughing": {
+                "enabled": False,
+                "depth_per_pass": 0.25,
+                "side_allowance": 0.0,
+                "bottom_allowance": 0.0,
+                "milling_direction": "climb",
+            },
+            "finishing": {
+                "enabled": True,
+                "side": True,
+                "bottom": False,
+                "passes": 1,
+                "milling_direction": "climb",
+            },
+            "tabs": tabs_on_bottom_edge(height=0.1),
+        }
+    )
+
+    passes = contour_operation_to_toolpaths(operation, source_path, tool, safe_z=0.5)
+
+    assert [toolpath_pass.kind for toolpath_pass in passes] == ["finish_contour"]
+    assert any(move.z == pytest.approx(-0.15) for move in passes[0].moves if move.type == "line")
+    assert not any(_segment_crosses_tab_span(segment, 1.38, 2.62) for segment in _xy_segments_at_z(passes[0], -0.25))
+    PREVIEWS.append(("test_contour_tabs_apply_to_finish_passes", source_path, passes))
+
+
+def test_contour_tabs_with_ramping_reenter_by_backing_up_to_far_side_of_tab():
+    source_path = rectangle_source_path("tabs-ramp", width=4, height=2)
+    tool = make_test_tool(diameter=0.25, depth_per_pass=0.25)
+    operation = ContourOperation.model_validate(
+        {
+            "id": "op-tabs-ramp",
+            "type": "contour",
+            "entity": "tabs-ramp",
+            "tool": "t5",
+            "depth": 0.25,
+            "offset": "on",
+            "ramping": True,
+            "roughing": {
+                "enabled": True,
+                "depth_per_pass": 0.25,
+                "side_allowance": 0.0,
+                "bottom_allowance": 0.0,
+                "milling_direction": "climb",
+            },
+            "finishing": {"enabled": False},
+            "tabs": tabs_on_bottom_edge(height=0.1),
+        }
+    )
+
+    passes = contour_operation_to_toolpaths(operation, source_path, tool, safe_z=0.5)
+
+    line_moves = [move for move in passes[0].moves if move.type == "line"]
+    bottom_moves = [(move.x, move.y, move.z) for move in line_moves if move.x is not None and move.y is not None]
+    assert any(move.z == pytest.approx(-0.15) for move in line_moves)
+    assert any(
+        first[0] is not None
+        and second[0] is not None
+        and first[1] == pytest.approx(0.0)
+        and second[1] == pytest.approx(0.0)
+        and second[0] < first[0]
+        and second[2] < first[2]
+        for first, second in zip(bottom_moves, bottom_moves[1:], strict=False)
+    )
+    PREVIEWS.append(("test_contour_tabs_with_ramping_reenter_by_backing_up_to_far_side_of_tab", source_path, passes))
+
+
 def test_contour_offset_validation_uses_realized_toolpath_moves():
     source_path = rectangle_source_path("e1", width=4, height=2)
     tool = make_test_tool(diameter=0.25, depth_per_pass=0.25)
@@ -237,6 +351,62 @@ def test_contour_offset_validation_uses_realized_toolpath_moves():
     assert len(arc_moves) == 4
     assert len(xy_moves) <= len(source_path.segments)
     PREVIEWS.append(("test_contour_offset_validation_uses_realized_toolpath_moves", source_path, passes))
+
+
+def test_contour_operation_uses_tool_feed_rate_by_default():
+    source_path = rectangle_source_path("feed-default", width=2, height=1)
+    tool = make_test_tool(diameter=0.25, depth_per_pass=0.125)
+    operation = ContourOperation.model_validate(
+        {
+            "id": "op-feed-default",
+            "type": "contour",
+            "entity": "feed-default",
+            "tool": "t5",
+            "depth": 0.125,
+            "offset": "outside",
+            "roughing": {
+                "enabled": True,
+                "depth_per_pass": 0.125,
+                "side_allowance": 0.0,
+                "bottom_allowance": 0.0,
+                "milling_direction": "climb",
+            },
+            "finishing": {"enabled": False},
+        }
+    )
+
+    passes = contour_operation_to_toolpaths(operation, source_path, tool, safe_z=0.5)
+
+    assert passes[0].feed_rate == pytest.approx(tool.feed_rate)
+
+
+def test_contour_operation_honors_feed_rate_override():
+    source_path = rectangle_source_path("feed-override", width=2, height=1)
+    tool = make_test_tool(diameter=0.25, depth_per_pass=0.125)
+    operation = ContourOperation.model_validate(
+        {
+            "id": "op-feed-override",
+            "type": "contour",
+            "entity": "feed-override",
+            "tool": "t5",
+            "depth": 0.125,
+            "feed_rate": 42.0,
+            "offset": "outside",
+            "roughing": {
+                "enabled": True,
+                "depth_per_pass": 0.125,
+                "side_allowance": 0.0,
+                "bottom_allowance": 0.0,
+                "milling_direction": "climb",
+            },
+            "finishing": {"enabled": False},
+        }
+    )
+
+    passes = contour_operation_to_toolpaths(operation, source_path, tool, safe_z=0.5)
+
+    assert passes[0].feed_rate == pytest.approx(42.0)
+    assert all(move.feed == pytest.approx(42.0) for move in passes[0].moves if move.type in {"line", "arc"})
 
 
 def test_contour_operation_handles_arc_and_line_profile():
@@ -348,6 +518,44 @@ def _line_move_xy_values(toolpath_pass):
     return [(move.x, move.y) for move in toolpath_pass.moves if move.type == "line"]
 
 
+def _xy_segments_at_z(toolpath_pass, z_value: float):
+    segments = []
+    current_x = None
+    current_y = None
+    current_z = None
+    for move in toolpath_pass.moves:
+        if move.type == "rapid":
+            if move.x is not None:
+                current_x = move.x
+            if move.y is not None:
+                current_y = move.y
+            if move.z is not None:
+                current_z = move.z
+            continue
+        if move.type != "line":
+            continue
+        start = (current_x, current_y, current_z)
+        if move.x is not None:
+            current_x = move.x
+        if move.y is not None:
+            current_y = move.y
+        if move.z is not None:
+            current_z = move.z
+        end = (current_x, current_y, current_z)
+        if None not in start and None not in end and start[2] == pytest.approx(z_value) and end[2] == pytest.approx(z_value):
+            segments.append((start, end))
+    return segments
+
+
+def _segment_crosses_tab_span(segment, start_x: float, end_x: float) -> bool:
+    first, second = segment
+    if first[1] != pytest.approx(0.0) or second[1] != pytest.approx(0.0):
+        return False
+    low = min(first[0], second[0])
+    high = max(first[0], second[0])
+    return low < end_x and high > start_x
+
+
 def rectangle_source_path(entity: str, width: float, height: float) -> SourcePath:
     points = [
         Point2D(x=0, y=0),
@@ -410,3 +618,22 @@ def make_test_tool(diameter: float, depth_per_pass: float) -> Tool:
             "depth_per_pass": depth_per_pass,
         }
     )
+
+
+def tabs_on_bottom_edge(height: float = 0.1):
+    return {
+        "enabled": True,
+        "width": 1.0,
+        "height": height,
+        "count": 1,
+        "locations": [
+            {
+                "center": {"x": 2.0, "y": 0.0},
+                "lower_left": {"x": 1.5, "y": -0.1},
+                "upper_right": {"x": 2.5, "y": 0.1},
+                "width": 1.0,
+                "height": height,
+                "angle_deg": 0.0,
+            }
+        ],
+    }

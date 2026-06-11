@@ -22,6 +22,7 @@ def move_operation_to_toolpaths(operation: MoveOperation) -> list[ToolpathPass]:
             kind="move",
             tool=None,
             tool_diameter=None,
+            feed_rate=operation.feed_rate,
             z_top=operation.z or 0.0,
             z_bottom=operation.z or 0.0,
             moves=[move],

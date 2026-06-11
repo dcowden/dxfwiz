@@ -1,0 +1,11 @@
+total_entities: 2
+drills: 0
+helical_drills: 1
+generated_screw_holes:
+  count: 0
+  locations: []
+generated_clamps:
+  count: 0
+  positions: []
+rough_contours: 1
+finishing_passes: 1

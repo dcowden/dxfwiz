@@ -13,6 +13,7 @@ def drill_operation_to_toolpaths(
     tool: Tool,
     safe_z: float,
 ) -> list[ToolpathPass]:
+    effective_feed = operation.feed_rate or tool.feed_rate
     moves: list[dict] = [{"type": "rapid", "x": center[0], "y": center[1], "z": safe_z}]
     target = -operation.depth
     peck = min(operation.peck_depth, operation.depth)
@@ -35,6 +36,7 @@ def drill_operation_to_toolpaths(
             kind="peck_drill",
             tool=operation.tool,
             tool_diameter=tool.diameter,
+            feed_rate=effective_feed,
             z_top=0.0,
             z_bottom=target,
             moves=moves,
@@ -52,10 +54,17 @@ def helical_drill_operation_to_toolpaths(
     max_slug_diameter: float = 0.5,
 ) -> list[ToolpathPass]:
     target = -operation.depth
+    effective_feed = operation.feed_rate or tool.feed_rate
     finish_radius = (hole_diameter - tool.diameter) / 2
     rough_radius = finish_radius
+    skip_roughing_for_fit = False
     if operation.finishing.enabled and operation.finishing.side:
-        rough_radius -= finishing_allowance
+        if finish_radius > finishing_allowance:
+            rough_radius -= finishing_allowance
+        elif finish_radius > 0 and operation.skip_roughing_when_finish_fits:
+            skip_roughing_for_fit = True
+        else:
+            rough_radius -= finishing_allowance
     direction = "ccw" if operation.milling_direction == "climb" else "cw"
     warnings = []
     if rough_radius <= 0:
@@ -67,25 +76,33 @@ def helical_drill_operation_to_toolpaths(
                 f"{operation.id}: tool diameter {tool.diameter:.6f} is too large for hole diameter {hole_diameter:.6f}",
             )
         ]
-    slug_diameter = max(0.0, 2 * (rough_radius - tool.diameter / 2))
-    if slug_diameter > max_slug_diameter:
+    if skip_roughing_for_fit:
         warnings.append(
-            f"{operation.id}: helical drilling leaves an interior slug about {slug_diameter:.3f} diameter"
+            f"{operation.id}: skipped roughing pass to accommodate selected tool; "
+            f"finish radius {finish_radius:.6f} fits but requested roughing allowance {finishing_allowance:.6f} does not."
         )
-    passes = [
-        ToolpathPass(
-            id=f"{operation.id}-rough-helix",
-            operation_id=operation.id,
-            entity=operation.entity,
-            kind="helical_drill",
-            tool=operation.tool,
-            tool_diameter=tool.diameter,
-            z_top=0.0,
-            z_bottom=target,
-            moves=_helix_moves(center, rough_radius, target, operation.pitch, direction, safe_z, operation.feed_rate or tool.feed_rate),
-            warnings=warnings,
-        )
-    ]
+        passes = []
+    else:
+        slug_diameter = max(0.0, 2 * (rough_radius - tool.diameter / 2))
+        if slug_diameter > max_slug_diameter:
+            warnings.append(
+                f"{operation.id}: helical drilling leaves an interior slug about {slug_diameter:.3f} diameter"
+            )
+        passes = [
+            ToolpathPass(
+                id=f"{operation.id}-rough-helix",
+                operation_id=operation.id,
+                entity=operation.entity,
+                kind="helical_drill",
+                tool=operation.tool,
+                tool_diameter=tool.diameter,
+                feed_rate=effective_feed,
+                z_top=0.0,
+                z_bottom=target,
+                moves=_helix_moves(center, rough_radius, target, operation.pitch, direction, safe_z, effective_feed),
+                warnings=warnings,
+            )
+        ]
     if operation.finishing.enabled and operation.finishing.side:
         if finish_radius <= 0:
             passes.append(
@@ -107,9 +124,11 @@ def helical_drill_operation_to_toolpaths(
                     kind="finish_contour",
                     tool=operation.tool,
                     tool_diameter=tool.diameter,
+                    feed_rate=effective_feed,
                     z_top=0.0,
                     z_bottom=target,
-                    moves=_finish_circle_moves(center, finish_radius, target, direction, safe_z, operation.feed_rate or tool.feed_rate),
+                    moves=_finish_circle_moves(center, finish_radius, target, direction, safe_z, effective_feed),
+                    warnings=warnings if skip_roughing_for_fit else [],
                 )
             )
     return passes
@@ -191,6 +210,7 @@ def _helical_warning_pass(
         kind=kind,
         tool=operation.tool,
         tool_diameter=tool.diameter,
+        feed_rate=operation.feed_rate or tool.feed_rate,
         z_top=0.0,
         z_bottom=z_bottom,
         moves=[],

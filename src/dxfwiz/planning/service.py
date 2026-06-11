@@ -7,15 +7,20 @@ from importlib.resources import files
 from typing import Any, Literal
 
 import ezdxf
+from ezdxf import path as ezdxf_path
 from pydantic import Field
 from ruamel.yaml import YAML
+from shapely.geometry import Point, Polygon, box
+from shapely.ops import unary_union
 
 from dxfwiz.config import load_config
+from dxfwiz.issues import issue_code
 from dxfwiz.schemas import GeometryFile, JobFile, MachineFile, PlannerFile
 from dxfwiz.schemas.common import StrictModel, Units
 from dxfwiz.schemas.job import JobInfo, Stock
 from dxfwiz.schemas.planner import OperationAdvice
 from dxfwiz.planning.yaml_format import dump_operation_yaml
+from dxfwiz.planning.tool_selector import select_largest_single_tool, selected_tool_rejections
 
 
 logger = logging.getLogger(__name__)
@@ -41,6 +46,8 @@ class PlannerInputs(StrictModel):
     finishing_allowance: float = Field(default=0.0, ge=0)
     cut_deeper_than_stock: float = Field(default=0.0, ge=0)
     screw_spacing: float | None = Field(default=None, gt=0)
+    min_screw_distance: float | None = Field(default=None, gt=0)
+    fixups: dict[str, bool] = Field(default_factory=dict)
 
 
 class PlanningRequest(StrictModel):
@@ -86,6 +93,17 @@ def generate_operation_plan(request: PlanningRequest, client: Any | None = None)
 
     planner_client = client or _planner_client_from_config()
     response = planner_client.generate(request)
+    if response.errors and _fixup_enabled(request, "fall_back_to_local_planner"):
+        fallback_response = LocalPlannerClient().generate(request)
+        fallback_response.warnings = [
+            *warnings,
+            PlanningIssue(
+                code=issue_code("ai_planner_fell_back_to_local"),
+                message="Planner errors were returned; used deterministic local planner as a configured fixup.",
+            ),
+            *fallback_response.warnings,
+        ]
+        return fallback_response
     response.warnings = [*warnings, *response.warnings]
     if response.plan:
         repair_warnings = _normalize_operation_plan(request, response.plan)
@@ -113,6 +131,8 @@ def _planner_client_from_config():
 
 
 def _normalize_operation_plan(request: PlanningRequest, plan: dict[str, Any]) -> list[PlanningIssue]:
+    if not _fixup_enabled(request, "normalize_contour_finishing"):
+        return []
     part_ids = {
         node["entity"]
         for node in _flatten_nodes([node.model_dump() for node in request.geometry.entity_map])
@@ -148,7 +168,7 @@ def _normalize_operation_plan(request: PlanningRequest, plan: dict[str, Any]) ->
     if removed_finish_count:
         warnings.append(
             PlanningIssue(
-                code="separate_finish_contours_merged",
+                code=issue_code("separate_finish_contours_merged"),
                 message=(
                     f"Merged {removed_finish_count} separate finish contour operation(s) into their parent "
                     "contour operation finishing settings."
@@ -158,7 +178,7 @@ def _normalize_operation_plan(request: PlanningRequest, plan: dict[str, Any]) ->
     if updated_finish_count and request.inputs.finishing_allowance > 0:
         warnings.append(
             PlanningIssue(
-                code="contour_finishing_settings_repaired",
+                code=issue_code("contour_finishing_settings_repaired"),
                 message="Updated contour operation finishing settings to match the requested finishing allowance.",
             )
         )
@@ -342,7 +362,7 @@ def _validate_required_inputs(inputs: PlannerInputs) -> list[PlanningIssue]:
     errors = []
     for field, value, message in required:
         if value is None or value == "" or value == []:
-            errors.append(PlanningIssue(code="missing_required_input", field=field, message=message))
+            errors.append(PlanningIssue(code=issue_code("missing_required_input"), field=field, message=message))
     return errors
 
 
@@ -354,31 +374,47 @@ def _planning_warnings(request: PlanningRequest) -> list[PlanningIssue]:
     for tool_id in missing_tools:
         warnings.append(
             PlanningIssue(
-                code="unknown_tool",
+                code=issue_code("unknown_tool"),
                 field="tools",
                 message=f"Selected tool {tool_id} is not in machine.yaml and will be ignored.",
             )
         )
     usable_tool_count = len([tool_id for tool_id in selected_tools if tool_id in machine_tools])
+    for tool_id in [tool_id for tool_id in selected_tools if tool_id in machine_tools]:
+        tool = machine_tools[tool_id]
+        rejections = selected_tool_rejections(tool, request.geometry, request.fixed_dxf)
+        if rejections and _fixup_enabled(request, "replace_invalid_default_tool"):
+            replacement = select_largest_single_tool(request.geometry, request.machine, request.fixed_dxf).tool
+            warnings.append(
+                PlanningIssue(
+                    code=issue_code("invalid_default_tool_replaced"),
+                    field="tools",
+                    message=(
+                        f"Requested tool {tool.id} cannot machine required features; "
+                        f"using {replacement.id} ({replacement.diameter:.4f}) instead."
+                    ),
+                )
+            )
     if usable_tool_count > request.machine.machine.max_tools:
         warnings.append(
             PlanningIssue(
-                code="tool_change_required",
+                code=issue_code("tool_change_required"),
                 field="tools",
                 message="Selected tools exceed machine max_tools; manual tool changes or replanning are required.",
             )
         )
     if "tabs" in request.machine.machine.part_holding:
-        warnings.append(
-            PlanningIssue(
-                code="tabs_not_fully_placed",
-                message="Tab placement is advisory in this first planner pass; verify straight segments before cutting.",
+        if _fixup_enabled(request, "accept_reduced_tab_count"):
+            warnings.append(
+                PlanningIssue(
+                    code=issue_code("tabs_not_fully_placed"),
+                    message="Tab placement is advisory in this first planner pass; verify straight segments before cutting.",
+                )
             )
-        )
     if request.inputs.planning_notes:
         warnings.append(
             PlanningIssue(
-                code="notes_not_interpreted",
+                code=issue_code("notes_not_interpreted"),
                 field="planning_notes",
                 message="Additional instructions are preserved for review but not fully interpreted by the first-pass planner.",
             )
@@ -387,6 +423,18 @@ def _planning_warnings(request: PlanningRequest) -> list[PlanningIssue]:
     if close_part_warning is not None:
         warnings.append(close_part_warning)
     return warnings
+
+
+def _fixup_enabled(request: PlanningRequest, name: str) -> bool:
+    defaults = {
+        "replace_invalid_default_tool": True,
+        "normalize_contour_finishing": True,
+        "accept_reduced_tab_count": True,
+        "skip_roughing_when_finish_fits": True,
+        "fall_back_to_local_planner": False,
+        "downgrade_pocket_to_profile_when_tool_fits_boundary": False,
+    }
+    return request.inputs.fixups.get(name, defaults.get(name, False))
 
 
 def _close_part_warning(request: PlanningRequest) -> PlanningIssue | None:
@@ -402,7 +450,7 @@ def _close_part_warning(request: PlanningRequest) -> PlanningIssue | None:
     if min_gap >= tool.diameter:
         return None
     return PlanningIssue(
-        code="parts_too_close",
+        code=issue_code("parts_too_close"),
         message=(
             f"Some parts are only {min_gap:.3f} {request.geometry.units.length} apart, "
             f"which is less than selected tool diameter {tool.diameter:.3f}. "
@@ -438,7 +486,7 @@ def _build_plan(request: PlanningRequest, warnings: list[PlanningIssue]) -> dict
     cut_depth = stock_thickness
 
     if "screws" in inputs.workholding_method:
-        for entity in _screw_entities(geometry, tool.diameter, inputs.screw_spacing):
+        for entity in _screw_entities(request, tool.diameter):
             generated_entities.append(entity)
             op = _screw_drill_operation(
                 len(operations) + 1,
@@ -463,7 +511,7 @@ def _build_plan(request: PlanningRequest, warnings: list[PlanningIssue]) -> dict
         entity = entities.get(node["entity"])
         if entity is None or node["role"] != "cutout" or entity.shape != "circle":
             continue
-        op = _hole_operation(len(operations) + 1, entity, tool.id, cut_depth, milling_direction)
+        op = _hole_operation(len(operations) + 1, entity, tool.id, cut_depth, milling_direction, request)
         operations.append(op)
         groups["internal_holes"].append(op["id"])
     for node in nodes:
@@ -487,7 +535,7 @@ def _build_plan(request: PlanningRequest, warnings: list[PlanningIssue]) -> dict
     if not operations:
         warnings.append(
             PlanningIssue(
-                code="no_operations_generated",
+                code=issue_code("no_operations_generated"),
                 message="No machinable part or cutout entities were found in geom.yaml.",
             )
         )
@@ -533,8 +581,15 @@ def _selected_tool_ids(request: PlanningRequest) -> list[str]:
 def _best_tool(request: PlanningRequest):
     machine_tools = {tool.id: tool for tool in request.machine.tools}
     selected_ids = [tool_id for tool_id in _selected_tool_ids(request) if tool_id in machine_tools]
-    candidates = [machine_tools[tool_id] for tool_id in selected_ids] or list(machine_tools.values())
-    return max(candidates, key=lambda tool: tool.diameter)
+    if selected_ids:
+        selected = max((machine_tools[tool_id] for tool_id in selected_ids), key=lambda tool: tool.diameter)
+        rejections = selected_tool_rejections(selected, request.geometry, request.fixed_dxf)
+        if not rejections:
+            return selected
+        if not _fixup_enabled(request, "replace_invalid_default_tool"):
+            return selected
+        logger.info("Selected tool %s does not fit geometry; falling back to largest fitting tool", selected.id)
+    return select_largest_single_tool(request.geometry, request.machine, request.fixed_dxf).tool
 
 
 def _flatten_nodes(nodes: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -573,7 +628,14 @@ def _pocket_operation(index: int, entity_id: str, tool_id: str, depth: float, di
     }
 
 
-def _hole_operation(index: int, entity, tool_id: str, depth: float, direction: str) -> dict[str, Any]:
+def _hole_operation(
+    index: int,
+    entity,
+    tool_id: str,
+    depth: float,
+    direction: str,
+    request: PlanningRequest,
+) -> dict[str, Any]:
     diameter = entity.diameter or 0
     op_type = "drill" if diameter <= 0.2 else "helical_drill"
     operation = {
@@ -592,10 +654,11 @@ def _hole_operation(index: int, entity, tool_id: str, depth: float, direction: s
                 "hole_diameter": diameter,
                 "pitch": min(depth, 0.08),
                 "milling_direction": direction,
-        "finishing": {
-            "enabled": True,
-            "side": True,
-            "bottom": False,
+                "skip_roughing_when_finish_fits": _fixup_enabled(request, "skip_roughing_when_finish_fits"),
+                "finishing": {
+                    "enabled": True,
+                    "side": True,
+                    "bottom": False,
                     "passes": 1,
                     "milling_direction": direction,
                 },
@@ -622,7 +685,7 @@ def _contour_operation(
     if tabs_enabled and len(tab_locations) < TAB_TARGET_COUNT:
         warnings.append(
             PlanningIssue(
-                code="insufficient_tab_locations",
+                code=issue_code("insufficient_tab_locations"),
                 entity=entity_id,
                 message=(
                     f"Could only place {len(tab_locations)}/{TAB_TARGET_COUNT} tabs on {entity_id}; "
@@ -668,20 +731,8 @@ def _cut_deeper_than_stock(request: PlanningRequest) -> float:
     return request.inputs.cut_deeper_than_stock
 
 
-def _screw_entities(geometry: GeometryFile, diameter: float, spacing: float | None = None) -> list[dict[str, Any]]:
-    bounds = _frame_or_summary_bounds(geometry)
-    min_x, min_y, max_x, max_y = bounds
-    inset = max(diameter * 2.5, 0.25)
-    points: list[tuple[float, float]] = [
-        (min_x + inset, min_y + inset),
-        (max_x - inset, min_y + inset),
-        (max_x - inset, max_y - inset),
-        (min_x + inset, max_y - inset),
-    ]
-    if spacing:
-        points.extend(_perimeter_screw_points(min_x, min_y, max_x, max_y, inset, spacing))
-    points = _points_in_scrap(points, geometry)
-    points = _unique_points(points)
+def _screw_entities(request: PlanningRequest, diameter: float) -> list[dict[str, Any]]:
+    points = _screw_points(request)
     return [
         {
             "id": f"wh{index}",
@@ -694,35 +745,194 @@ def _screw_entities(geometry: GeometryFile, diameter: float, spacing: float | No
     ]
 
 
-def _perimeter_screw_points(
-    min_x: float,
-    min_y: float,
-    max_x: float,
-    max_y: float,
-    inset: float,
+def _screw_points(request: PlanningRequest) -> list[tuple[float, float]]:
+    geometry = request.geometry
+    bounds = _frame_or_summary_bounds(geometry)
+    min_x, min_y, max_x, max_y = bounds
+    grid = request.machine.machine.screw_grid or request.inputs.screw_spacing
+    if not grid:
+        logger.info("Skipping screw placement because no screw_grid is configured")
+        return []
+    clearance = request.machine.machine.screw_clearance or 0.0
+    min_neighbor_distance = request.inputs.min_screw_distance or (grid * 1.01)
+    stock = box(min_x, min_y, max_x, max_y)
+    blocked = _part_clearance_polygons(request, clearance)
+    candidates = [
+        point
+        for point in _grid_points(min_x, min_y, max_x, max_y, grid)
+        if _point_in_stock_scrap(point, stock, blocked)
+    ]
+    candidates = _unique_points(candidates)
+    target_spacing = request.inputs.screw_spacing or _default_screw_spacing(request)
+    selected = _select_screw_points_from_grid(candidates, bounds, target_spacing)
+    selected = _add_missing_screw_neighbors(selected, candidates, min_neighbor_distance)
+    return _points_with_near_neighbor(_unique_points(selected), min_neighbor_distance)
+
+
+def _default_screw_spacing(request: PlanningRequest) -> float:
+    return 12.0 if request.geometry.units.length == "in" else 300.0
+
+
+def _grid_points(min_x: float, min_y: float, max_x: float, max_y: float, spacing: float) -> list[tuple[float, float]]:
+    points: list[tuple[float, float]] = []
+    x = min_x
+    while x <= max_x + spacing + 1e-9:
+        y = min_y
+        while y <= max_y + spacing + 1e-9:
+            points.append((round(x, 6), round(y, 6)))
+            y += spacing
+        x += spacing
+    return points
+
+
+def _point_in_stock_scrap(point: tuple[float, float], stock: Polygon, blocked) -> bool:
+    location = Point(point)
+    if not stock.covers(location):
+        return False
+    if blocked is None or blocked.is_empty:
+        return True
+    return not blocked.covers(location)
+
+
+def _points_with_near_neighbor(points: list[tuple[float, float]], max_distance: float) -> list[tuple[float, float]]:
+    if len(points) < 2:
+        return []
+    threshold = max_distance + 1e-9
+    result = []
+    for index, point in enumerate(points):
+        if any(_distance(point, other) <= threshold for other_index, other in enumerate(points) if other_index != index):
+            result.append(point)
+    return result
+
+
+def _select_screw_points_from_grid(
+    candidates: list[tuple[float, float]],
+    bounds: tuple[float, float, float, float],
     spacing: float,
 ) -> list[tuple[float, float]]:
-    left = min_x + inset
-    right = max_x - inset
-    bottom = min_y + inset
-    top = max_y - inset
-    if right <= left or top <= bottom:
+    if not candidates:
         return []
-    return [
-        *((x, bottom) for x in _interior_spacing_points(left, right, spacing)),
-        *((x, top) for x in _interior_spacing_points(left, right, spacing)),
-        *((left, y) for y in _interior_spacing_points(bottom, top, spacing)),
-        *((right, y) for y in _interior_spacing_points(bottom, top, spacing)),
+    min_x, min_y, max_x, max_y = bounds
+    target_points = [
+        (x, y)
+        for x in _target_values(min_x, max_x, spacing)
+        for y in _target_values(min_y, max_y, spacing)
     ]
+    selected: list[tuple[float, float]] = []
+    available = list(candidates)
+    for target in target_points:
+        point = min(available, key=lambda candidate: _distance(candidate, target))
+        if _distance(point, target) <= spacing * 0.75:
+            selected.append(point)
+    return _unique_points(selected)
 
 
-def _interior_spacing_points(start: float, end: float, spacing: float) -> list[float]:
-    points = []
+def _target_values(start: float, end: float, spacing: float) -> list[float]:
+    values = [start]
     value = start + spacing
     while value < end - spacing * 0.25:
-        points.append(value)
+        values.append(value)
         value += spacing
-    return points
+    if end - values[-1] > spacing * 0.25:
+        values.append(end)
+    return values
+
+
+def _add_missing_screw_neighbors(
+    selected: list[tuple[float, float]],
+    candidates: list[tuple[float, float]],
+    max_distance: float,
+) -> list[tuple[float, float]]:
+    result = list(selected)
+    selected_keys = {(round(x, 6), round(y, 6)) for x, y in result}
+    for point in selected:
+        if _has_neighbor(point, result, max_distance):
+            continue
+        neighbors = [
+            candidate
+            for candidate in candidates
+            if (round(candidate[0], 6), round(candidate[1], 6)) not in selected_keys
+            and 0 < _distance(point, candidate) <= max_distance + 1e-9
+        ]
+        if not neighbors:
+            continue
+        neighbor = min(neighbors, key=lambda candidate: _distance(point, candidate))
+        result.append(neighbor)
+        selected_keys.add((round(neighbor[0], 6), round(neighbor[1], 6)))
+    return result
+
+
+def _has_neighbor(point: tuple[float, float], points: list[tuple[float, float]], max_distance: float) -> bool:
+    return any(point != other and _distance(point, other) <= max_distance + 1e-9 for other in points)
+
+
+def _distance(first: tuple[float, float], second: tuple[float, float]) -> float:
+    return math.hypot(first[0] - second[0], first[1] - second[1])
+
+
+def _part_clearance_polygons(request: PlanningRequest, clearance: float):
+    polygons = [
+        polygon.buffer(clearance, join_style=2)
+        for polygon in _part_polygons(request)
+        if not polygon.is_empty
+    ]
+    if not polygons:
+        return None
+    return unary_union(polygons)
+
+
+def _part_polygons(request: PlanningRequest) -> list[Polygon]:
+    entities = {entity.id: entity for entity in request.geometry.entities}
+    polygons: list[Polygon] = []
+    for node in _flatten_nodes([node.model_dump() for node in request.geometry.entity_map]):
+        if node["role"] != "part":
+            continue
+        entity = entities.get(node["entity"])
+        if entity is None:
+            continue
+        polygon = _entity_polygon(entity, request)
+        if polygon is not None and not polygon.is_empty:
+            polygons.append(polygon)
+    return polygons
+
+
+def _entity_polygon(entity, request: PlanningRequest) -> Polygon | None:
+    if request.fixed_dxf:
+        dxf_entity = _dxf_entity_for_geometry_entity(entity, request.fixed_dxf)
+        polygon = _dxf_polygon(dxf_entity, request.geometry.units.coordinate_scale)
+        if polygon is not None:
+            return polygon
+    if entity.shape == "circle" and entity.center and entity.diameter:
+        return Point(entity.center.x, entity.center.y).buffer(entity.diameter / 2, quad_segs=48)
+    if entity.bounding_box:
+        bounds = entity.bounding_box
+        return box(bounds.min.x, bounds.min.y, bounds.max.x, bounds.max.y)
+    return None
+
+
+def _dxf_polygon(dxf_entity, scale: float) -> Polygon | None:
+    if dxf_entity is None:
+        return None
+    if dxf_entity.dxftype() == "CIRCLE":
+        center = dxf_entity.dxf.center
+        radius = float(dxf_entity.dxf.radius) * scale
+        return Point(float(center.x) * scale, float(center.y) * scale).buffer(radius, quad_segs=48)
+    try:
+        points = [
+            (float(vertex.x) * scale, float(vertex.y) * scale)
+            for vertex in ezdxf_path.make_path(dxf_entity).flattening(0.005 / max(scale, 1e-9))
+        ]
+    except Exception:
+        logger.debug("Could not flatten DXF entity %s for screw clearance polygon", dxf_entity, exc_info=True)
+        return None
+    if len(points) < 3:
+        return None
+    if points[0] != points[-1]:
+        points.append(points[0])
+    polygon = Polygon(points)
+    if not polygon.is_valid:
+        polygon = polygon.buffer(0)
+    return polygon if not polygon.is_empty else None
 
 
 def _unique_points(points: list[tuple[float, float]]) -> list[tuple[float, float]]:
@@ -737,18 +947,6 @@ def _unique_points(points: list[tuple[float, float]]) -> list[tuple[float, float
     return result
 
 
-def _points_in_scrap(points: list[tuple[float, float]], geometry: GeometryFile) -> list[tuple[float, float]]:
-    if not any(node.role == "frame" for node in geometry.entity_map):
-        return points
-    part_boxes = _part_boxes(geometry)
-    result = []
-    for point in points:
-        if any(_box_contains_point(box, point) for box in part_boxes):
-            continue
-        result.append(point)
-    return result
-
-
 def _part_boxes(geometry: GeometryFile):
     entities = {entity.id: entity for entity in geometry.entities}
     boxes = []
@@ -759,11 +957,6 @@ def _part_boxes(geometry: GeometryFile):
         if entity and entity.bounding_box:
             boxes.append(entity.bounding_box)
     return boxes
-
-
-def _box_contains_point(box, point: tuple[float, float]) -> bool:
-    x, y = point
-    return box.min.x <= x <= box.max.x and box.min.y <= y <= box.max.y
 
 
 def _screw_drill_operation(index: int, entity_id: str, tool_id: str, depth: float, clear_z: float, tool) -> dict[str, Any]:

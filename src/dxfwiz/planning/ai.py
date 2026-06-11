@@ -9,6 +9,7 @@ import litellm
 from pydantic import Field
 
 from dxfwiz.config import GeminiConfig
+from dxfwiz.issues import issue_code
 from dxfwiz.planning.ai_stats import AiCallStats, record_ai_call
 from dxfwiz.planning.service import PlanningIssue, PlanningRequest, PlanningResponse
 from dxfwiz.planning.yaml_format import dump_operation_yaml
@@ -39,7 +40,7 @@ class GeminiPlannerClient:
             return PlanningResponse(
                 errors=[
                     PlanningIssue(
-                        code="missing_gemini_api_key",
+                        code=issue_code("missing_gemini_api_key"),
                         field="gemini.api_key",
                         message="Gemini API key is missing. Add it to config.yaml.",
                     )
@@ -90,7 +91,7 @@ class GeminiPlannerClient:
             return PlanningResponse(
                 errors=[
                     PlanningIssue(
-                        code="ai_planner_error",
+                        code=issue_code("ai_planner_error"),
                         message=f"Gemini planning request failed: {exc}",
                     )
                 ],
@@ -123,7 +124,7 @@ class GeminiPlannerClient:
             return PlanningResponse(
                 errors=[
                     PlanningIssue(
-                        code="missing_ai_plan",
+                        code=issue_code("missing_ai_plan"),
                         message="Gemini did not return an operation plan.",
                     )
                 ],

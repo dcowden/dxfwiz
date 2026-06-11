@@ -7,6 +7,7 @@ from dxfwiz.schemas.common import AxisRange, StrictModel, Units
 
 WorkholdingOption = Literal["clamps", "screws", "tape", "vacuum"]
 PartHoldingOption = Literal["onionskin", "z_rollers", "z_presser", "tabs"]
+OperationSortPriority = Literal["tool", "group", "role", "nest_order"]
 
 
 class WorkEnvelope(StrictModel):
@@ -33,6 +34,9 @@ class Machine(StrictModel):
     axes: int = Field(ge=2, le=3)
     max_tools: int = Field(ge=1)
     clear_z: float
+    screw_grid: float | None = Field(default=None, gt=0)
+    screw_clearance: float | None = Field(default=None, ge=0)
+    operation_sort: list[OperationSortPriority] = Field(default_factory=lambda: ["tool", "group", "nest_order"])
     workholding: list[WorkholdingOption]
     part_holding: list[PartHoldingOption]
     work_envelope: WorkEnvelope

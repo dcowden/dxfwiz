@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from math import atan2, isclose, radians, tan
+from math import atan2, cos, isclose, pi, radians, sin, tan
 from pathlib import Path
-from typing import Iterable
+from typing import Iterable, Literal
 
 import ezdxf
 
@@ -19,6 +19,8 @@ class CleanDxfConfig:
     duplicate_tolerance: float = 0.0005
     min_segment_length: float = 0.001
     preserve_arcs: bool = True
+    arc_detection: Literal["OFF", "FOR_PLANNING", "RECOVER"] = "OFF"
+    arc_tolerance: float = 0.002
 
 
 @dataclass
@@ -30,6 +32,7 @@ class CleanDxfResult:
     zero_length_removed: int = 0
     duplicates_removed: int = 0
     endpoints_snapped: int = 0
+    arcs_recovered: int = 0
     closed_loops: int = 0
     open_paths: int = 0
     warnings: list[str] = field(default_factory=list)
@@ -103,6 +106,8 @@ def clean_dxf(
     result.duplicates_removed = duplicates_removed
 
     chains = _build_chains(segments, config.gap_tolerance)
+    if config.arc_detection == "RECOVER" and config.arc_tolerance > 0:
+        chains, result.arcs_recovered = _recover_arcs_in_chains(chains, config.arc_tolerance)
     closed_chains = [chain for chain in chains if _points_close(chain[0].start, chain[-1].end, config.gap_tolerance)]
     open_chains = [chain for chain in chains if chain not in closed_chains]
 
@@ -133,11 +138,12 @@ def clean_dxf(
     output_path.parent.mkdir(parents=True, exist_ok=True)
     out_doc.saveas(output_path)
     logger.info(
-        "Wrote fixed DXF %s (%d closed loop(s), %d open path(s), %d duplicate(s) removed)",
+        "Wrote fixed DXF %s (%d closed loop(s), %d open path(s), %d duplicate(s) removed, %d arc(s) recovered)",
         output_path,
         result.closed_loops,
         result.open_paths,
         result.duplicates_removed,
+        result.arcs_recovered,
     )
     return result
 
@@ -338,6 +344,108 @@ def _add_lwpolyline(layout, chain: list[Segment], closed: bool, layer: str):
         close=closed,
         dxfattribs={"layer": layer},
     )
+
+
+def _recover_arcs_in_chains(chains: list[list[Segment]], tolerance: float) -> tuple[list[list[Segment]], int]:
+    recovered_count = 0
+    result: list[list[Segment]] = []
+    for chain in chains:
+        recovered_chain, chain_count = _recover_arcs_in_chain(chain, tolerance)
+        result.append(recovered_chain)
+        recovered_count += chain_count
+    return result, recovered_count
+
+
+def _recover_arcs_in_chain(chain: list[Segment], tolerance: float) -> tuple[list[Segment], int]:
+    recovered: list[Segment] = []
+    index = 0
+    count = 0
+    while index < len(chain):
+        if chain[index].kind != "line":
+            recovered.append(chain[index])
+            index += 1
+            continue
+        best: tuple[int, Segment] | None = None
+        max_end = index
+        while max_end < len(chain) and chain[max_end].kind == "line":
+            max_end += 1
+        for end in range(index + 3, max_end + 1):
+            points = _chain_points(chain[index:end])
+            arc = _fit_arc_segment(points, tolerance)
+            if arc is not None:
+                best = (end, arc)
+        if best is None:
+            recovered.append(chain[index])
+            index += 1
+            continue
+        end, arc = best
+        recovered.append(arc)
+        count += 1
+        index = end
+    return recovered, count
+
+
+def _chain_points(chain: list[Segment]) -> list[Point]:
+    if not chain:
+        return []
+    return [chain[0].start, *(segment.end for segment in chain)]
+
+
+def _fit_arc_segment(points: list[Point], tolerance: float) -> Segment | None:
+    if len(points) < 4:
+        return None
+    first = points[0]
+    middle = points[len(points) // 2]
+    last = points[-1]
+    center = _circle_center(first, middle, last)
+    if center is None:
+        return None
+    radius = _distance(first, center)
+    if radius <= tolerance:
+        return None
+    errors = [abs(_distance(point, center) - radius) for point in points]
+    if max(errors) > tolerance or sum(errors) / len(errors) > tolerance / 2:
+        return None
+    signed = _signed_sweep(points, center)
+    if abs(signed) < radians(10) or abs(signed) > radians(270):
+        return None
+    bulge = tan(signed / 4.0)
+    return Segment(kind="arc", start=first, end=last, bulge=bulge)
+
+
+def _circle_center(first: Point, second: Point, third: Point) -> Point | None:
+    ax, ay = first
+    bx, by = second
+    cx, cy = third
+    determinant = 2 * (ax * (by - cy) + bx * (cy - ay) + cx * (ay - by))
+    if abs(determinant) <= 1e-12:
+        return None
+    ux = (
+        (ax * ax + ay * ay) * (by - cy)
+        + (bx * bx + by * by) * (cy - ay)
+        + (cx * cx + cy * cy) * (ay - by)
+    ) / determinant
+    uy = (
+        (ax * ax + ay * ay) * (cx - bx)
+        + (bx * bx + by * by) * (ax - cx)
+        + (cx * cx + cy * cy) * (bx - ax)
+    ) / determinant
+    return ux, uy
+
+
+def _signed_sweep(points: list[Point], center: Point) -> float:
+    total = 0.0
+    previous = atan2(points[0][1] - center[1], points[0][0] - center[0])
+    for point in points[1:]:
+        angle = atan2(point[1] - center[1], point[0] - center[0])
+        delta = angle - previous
+        while delta <= -pi:
+            delta += 2 * pi
+        while delta > pi:
+            delta -= 2 * pi
+        total += delta
+        previous = angle
+    return total
 
 
 def _polar_point(center: Point, radius: float, angle_degrees: float) -> Point:

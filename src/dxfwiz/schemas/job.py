@@ -1,8 +1,8 @@
 from typing import Annotated, Literal
 
-from pydantic import Field
+from pydantic import AliasChoices, Field, model_validator
 
-from dxfwiz.schemas.common import StrictModel, Units
+from dxfwiz.schemas.common import Point2D, StrictModel, Units
 
 
 class JobInfo(StrictModel):
@@ -32,9 +32,9 @@ class Tabs(StrictModel):
 
 
 class TabLocation(StrictModel):
-    center: dict[str, float]
-    lower_left: dict[str, float]
-    upper_right: dict[str, float]
+    center: Point2D
+    lower_left: Point2D
+    upper_right: Point2D
     width: float | None = Field(default=None, gt=0)
     height: float | None = Field(default=None, gt=0)
     angle_deg: float | None = None
@@ -69,7 +69,7 @@ class BaseOperation(StrictModel):
     entity: str
     tool: str
     depth: float = Field(gt=0)
-    speed: int | None = Field(default=None, gt=0)
+    spindle_speed: int | None = Field(default=None, gt=0, validation_alias=AliasChoices("spindle_speed", "speed"))
     feed_rate: float | None = Field(default=None, gt=0)
     plunge_rate: float | None = Field(default=None, gt=0)
 
@@ -106,6 +106,7 @@ class HelicalDrillOperation(BaseOperation):
     hole_diameter: float | None = Field(default=None, gt=0)
     pitch: float = Field(gt=0)
     milling_direction: Literal["climb", "conventional"]
+    skip_roughing_when_finish_fits: bool = True
     finishing: Finishing = Field(default_factory=lambda: Finishing(enabled=True, side=True, bottom=False))
     lead_in: LeadIn | None = None
 
@@ -125,6 +126,12 @@ class MoveOperation(StrictModel):
     z: float | None = None
     is_rapid: bool = True
     feed_rate: float | None = Field(default=None, gt=0)
+
+    @model_validator(mode="after")
+    def at_least_one_axis(self) -> "MoveOperation":
+        if self.x is None and self.y is None and self.z is None:
+            raise ValueError("move operation requires at least one of x, y, or z")
+        return self
 
 
 Operation = Annotated[
@@ -147,10 +154,10 @@ class GeneratedEntity(StrictModel):
     id: str
     role: Literal["screw_hole", "tab", "clamp"]
     shape: Literal["circle", "rectangle"]
-    center: dict[str, float] | None = None
+    center: Point2D | None = None
     diameter: float | None = Field(default=None, gt=0)
-    lower_left: dict[str, float] | None = None
-    upper_right: dict[str, float] | None = None
+    lower_left: Point2D | None = None
+    upper_right: Point2D | None = None
     width: float | None = Field(default=None, gt=0)
     height: float | None = Field(default=None, gt=0)
     angle_deg: float | None = None

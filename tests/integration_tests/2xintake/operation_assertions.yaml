@@ -1,0 +1,29 @@
+total_entities: 59
+drills: 30
+helical_drills: 38
+generated_screw_holes:
+  count: 18
+  locations:
+    - {x: 28, y: 20}
+    - {x: 28, y: 32}
+    - {x: 28, y: 40}
+    - {x: 40, y: 20}
+    - {x: 40, y: 32}
+    - {x: 40, y: 40}
+    - {x: 53, y: 20}
+    - {x: 53, y: 32}
+    - {x: 53, y: 40}
+    - {x: 28, y: 20}
+    - {x: 28, y: 31}
+    - {x: 28, y: 39}
+    - {x: 39, y: 20}
+    - {x: 39, y: 32}
+    - {x: 39, y: 40}
+    - {x: 52, y: 20}
+    - {x: 53, y: 31}
+    - {x: 52, y: 40}
+generated_clamps:
+  count: 0
+  positions: []
+rough_contours: 4
+finishing_passes: 4

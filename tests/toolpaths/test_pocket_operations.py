@@ -140,6 +140,15 @@ def test_pocket_tool_that_barely_fits_still_generates_small_path():
     ys = [move.y for move in passes[0].moves if move.type in {"rapid", "line"} and move.y is not None]
     assert max(xs) - min(xs) == pytest.approx(0.6)
     assert max(ys) - min(ys) <= 0.02
+    bottom_return_moves = [
+        move
+        for move in passes[0].moves
+        if move.type == "line" and move.x == pytest.approx(0.2) and move.z == pytest.approx(-0.1)
+    ]
+    assert bottom_return_moves
+    wall_finish = next(toolpath_pass for toolpath_pass in passes if toolpath_pass.kind == "pocket_wall_finish")
+    assert wall_finish.moves
+    assert not wall_finish.warnings
     PREVIEWS.append(("test_pocket_tool_that_barely_fits_still_generates_small_path", source_path, passes))
 
 

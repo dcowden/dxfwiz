@@ -1,0 +1,8 @@
+max_errors: 0
+max_warnings: 100
+errors:
+  does_not_have_codes: [E3001]
+  max_severity: 0
+warnings:
+  max_severity: 2
+

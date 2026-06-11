@@ -1,8 +1,27 @@
 from __future__ import annotations
 
 import logging
+from typing import Any
 
-from dxfwiz.toolpaths.core import ToolpathCommand, ToolpathProgram
+from dxfwiz.toolpaths.model import (
+    ArcMove,
+    CommentCommand,
+    CoordinateSystemCommand,
+    DistanceModeCommand,
+    DwellMove,
+    FeedModeCommand,
+    LineMove,
+    PlaneCommand,
+    ProgramEndCommand,
+    RapidMove,
+    SpindleMove,
+    SpindleSpeedCommand,
+    ToolChangeMove,
+    ToolpathCommand,
+    ToolpathPlan,
+    WarningCommand,
+    UnitsCommand,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -12,59 +31,70 @@ class UccncPost:
     def __init__(self, precision: int = 4) -> None:
         self.precision = precision
 
-    def render(self, program: ToolpathProgram) -> str:
-        logger.info("Rendering UCCNC G-code with %d command(s)", len(program.commands))
+    def render(self, plan: ToolpathPlan) -> str:
+        command_count = len(plan.commands) + sum(len(toolpath_pass.moves) for toolpath_pass in plan.passes)
+        logger.info("Rendering UCCNC G-code with %d neutral command(s)", command_count)
         lines = []
-        for command in program.commands:
+        for command in plan.commands:
             line = self._render_command(command)
             if line:
                 lines.append(line)
+        for warning in plan.warnings:
+            lines.append(f"(WARNING: {warning})")
+        for toolpath_pass in plan.passes:
+            for command in toolpath_pass.moves:
+                line = self._render_command(command)
+                if line:
+                    lines.append(line)
         return "\n".join(lines) + "\n"
 
     def _render_command(self, command: ToolpathCommand) -> str | None:
-        values = command.values
-        if command.name == "comment":
-            return f"({values['text']})"
-        if command.name == "units":
-            return "G21" if values["length"] == "mm" else "G20"
-        if command.name == "distance_mode":
-            return "G90" if values["mode"] == "absolute" else "G91"
-        if command.name == "plane":
+        if isinstance(command, CommentCommand):
+            return f"({command.text})"
+        if isinstance(command, WarningCommand):
+            return f"(WARNING: {command.text})"
+        if isinstance(command, UnitsCommand):
+            return "G21" if command.length == "mm" else "G20"
+        if isinstance(command, DistanceModeCommand):
+            return "G90" if command.mode == "absolute" else "G91"
+        if isinstance(command, PlaneCommand):
             return "G17"
-        if command.name == "feed_mode":
+        if isinstance(command, FeedModeCommand):
             return "G94"
-        if command.name == "coordinate_system":
-            return values["code"]
-        if command.name == "tool_change":
-            return f"T{_tool_number(values['tool'])} M6"
-        if command.name == "spindle_on":
-            return f"S{int(values['rpm'])} M3"
-        if command.name == "spindle_off":
-            return "M5"
-        if command.name == "rapid":
-            return self._motion("G0", values)
-        if command.name == "feed":
-            return self._motion("G1", values)
-        if command.name == "arc":
-            code = "G3" if values.get("direction") == "ccw" else "G2"
-            return self._motion(code, values, include_ij=True)
-        if command.name == "dwell":
-            return f"G4 P{self._format(values['seconds'])}"
-        if command.name == "program_end":
+        if isinstance(command, CoordinateSystemCommand):
+            return command.code
+        if isinstance(command, ToolChangeMove):
+            return f"T{_tool_number(command.tool)} M6"
+        if isinstance(command, SpindleSpeedCommand):
+            return f"S{int(command.rpm)}"
+        if isinstance(command, SpindleMove):
+            return "M3" if command.state == "on" else "M5"
+        if isinstance(command, RapidMove):
+            return self._motion("G0", command)
+        if isinstance(command, LineMove):
+            return self._motion("G1", command)
+        if isinstance(command, ArcMove):
+            return self._motion("G3" if command.direction == "ccw" else "G2", command, include_ij=True)
+        if isinstance(command, DwellMove):
+            return f"G4 P{self._format(command.seconds)}"
+        if isinstance(command, ProgramEndCommand):
             return "M30"
         return None
 
-    def _motion(self, code: str, values: dict, include_ij: bool = False) -> str:
+    def _motion(self, code: str, command: Any, include_ij: bool = False) -> str:
         parts = [code]
         for axis in ("x", "y", "z"):
-            if axis in values and values[axis] is not None:
-                parts.append(axis.upper() + self._format(values[axis]))
+            value = getattr(command, axis, None)
+            if value is not None:
+                parts.append(axis.upper() + self._format(value))
         if include_ij:
             for axis in ("i", "j"):
-                if axis in values and values[axis] is not None:
-                    parts.append(axis.upper() + self._format(values[axis]))
-        if "feed" in values and values["feed"] is not None:
-            parts.append("F" + self._format(values["feed"]))
+                value = getattr(command, axis, None)
+                if value is not None:
+                    parts.append(axis.upper() + self._format(value))
+        feed = getattr(command, "feed", None)
+        if feed is not None:
+            parts.append("F" + self._format(feed))
         return " ".join(parts)
 
     def _format(self, value: float) -> str:

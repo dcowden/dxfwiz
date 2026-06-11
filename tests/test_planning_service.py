@@ -94,8 +94,8 @@ def test_planner_calls_ai_client_for_operation_plan(tmp_path):
     assert job.stock.material == "plywood"
     assert job.coordinate_system == "G55"
     assert {operation.type for operation in job.operations} >= {"contour", "drill"}
-    assert job.tools[0].tool == "t5"
-    assert job.tools[0].diameter == 0.25
+    assert job.tools[0].tool == "t3"
+    assert job.tools[0].diameter == 0.1875
 
 
 def test_ai_plan_missing_contour_finishing_settings_is_repaired(tmp_path):
@@ -117,7 +117,7 @@ def test_ai_plan_missing_contour_finishing_settings_is_repaired(tmp_path):
     response = generate_operation_plan(request, client=MissingFinishPlannerClient())
 
     assert response.errors == []
-    assert any(warning.code == "contour_finishing_settings_repaired" for warning in response.warnings)
+    assert any(warning.code == "W2006" for warning in response.warnings)
     job = JobFile.model_validate(response.plan)
     contour_operations = [
         operation
@@ -129,6 +129,30 @@ def test_ai_plan_missing_contour_finishing_settings_is_repaired(tmp_path):
     assert all(operation.finishing.enabled for operation in contour_operations)
     assert all(operation.roughing.side_allowance == 0.01 for operation in contour_operations)
     assert "contours" in {group.name for group in job.operation_groups}
+
+
+def test_local_planner_selects_largest_single_tool_when_no_tool_is_specified(tmp_path):
+    request = _planning_request(
+        tmp_path,
+        inputs={
+            "stock_xy": "9.500 x 48.000 in frame",
+            "stock_units": "in",
+            "stock_thickness": 0.25,
+            "stock_material": "plywood",
+            "z_zero_position": "stock_top",
+            "coordinate_system": "G55",
+            "workholding_method": ["screws"],
+            "cut_deeper_than_stock": 0.01,
+            "finishing_allowance": 0.01,
+        },
+    )
+
+    response = generate_operation_plan(request, client=FakePlannerClient())
+
+    assert response.errors == []
+    job = JobFile.model_validate(response.plan)
+    assert job.tools[0].tool == "t3"
+    assert all(getattr(operation, "tool", None) == "t3" for operation in job.operations)
 
 
 class FakePlannerClient:
@@ -163,7 +187,7 @@ class MissingFinishPlannerClient(FakePlannerClient):
 
 
 def _planning_request(tmp_path, inputs):
-    source = ROOT / "tests" / "dxf_clean" / "2xintake" / "2xintakev3_and_2xkickerv1.dxf"
+    source = ROOT / "tests" / "integration_tests" / "2xintake" / "2xintakev3_and_2xkickerv1.dxf"
     fixed = tmp_path / "fixed.dxf"
     geom_path = tmp_path / "geom.yaml"
     clean_dxf(source, fixed)
@@ -182,6 +206,12 @@ def _planning_request(tmp_path, inputs):
             "system_advice": load_system_planner_advice().model_dump(mode="json"),
             "user_advice": planner.operation_advice.model_dump(mode="json"),
             "fixed_dxf": fixed.read_text(encoding="utf-8", errors="ignore"),
-            "inputs": inputs,
+            "inputs": {
+                **inputs,
+                "fixups": {
+                    name: bool(setting["enabled"])
+                    for name, setting in planner.defaults.fixups.model_dump().items()
+                },
+            },
         }
     )

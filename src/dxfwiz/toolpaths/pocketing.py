@@ -119,6 +119,7 @@ def _clearing_pass(
         kind=kind,
         tool=operation.tool,
         tool_diameter=tool.diameter,
+        feed_rate=feed,
         z_top=0.0,
         z_bottom=z_bottom,
         source_path=source_path.id,
@@ -152,6 +153,7 @@ def _wall_finish_pass(
         kind="pocket_wall_finish",
         tool=operation.tool,
         tool_diameter=tool.diameter,
+        feed_rate=feed,
         z_top=0.0,
         z_bottom=z_bottom,
         source_path=source_path.id,
@@ -294,13 +296,15 @@ def _level_moves(
         start = oriented.points[0]
         if current is None:
             moves.extend(_enter_path_moves(oriented, z_bottom, safe_z, feed, ramp))
+            current = _enter_path_endpoint(oriented, ramp)
         elif _can_cut_link(area, current, start):
             moves.append({"type": "line", "x": start[0], "y": start[1], "z": z_bottom, "feed": feed})
             moves.extend(_cut_path_moves(oriented, z_bottom, feed, include_first=False))
+            current = oriented.points[0] if oriented.closed else oriented.points[-1]
         else:
             moves.append({"type": "rapid", "z": safe_z})
             moves.extend(_enter_path_moves(oriented, z_bottom, safe_z, feed, ramp))
-        current = oriented.points[0] if oriented.closed else oriented.points[-1]
+            current = _enter_path_endpoint(oriented, ramp)
     if moves:
         moves.append({"type": "rapid", "z": safe_z})
     return moves
@@ -326,10 +330,21 @@ def _enter_path_moves(
         if pocket_path.closed:
             remaining = [*remaining, points[0]]
         moves.extend({"type": "line", "x": x, "y": y, "z": z_bottom, "feed": feed} for x, y in remaining)
+        if not pocket_path.closed:
+            moves.extend(
+                {"type": "line", "x": x, "y": y, "z": z_bottom, "feed": feed}
+                for x, y in reversed(points[:-1])
+            )
     else:
         moves.append({"type": "line", "z": z_bottom, "feed": feed})
         moves.extend(_cut_path_moves(pocket_path, z_bottom, feed, include_first=False))
     return moves
+
+
+def _enter_path_endpoint(pocket_path: _PocketPath, ramp: bool) -> tuple[float, float]:
+    if not pocket_path.closed and ramp:
+        return pocket_path.points[0]
+    return pocket_path.points[0] if pocket_path.closed else pocket_path.points[-1]
 
 
 def _cut_path_moves(

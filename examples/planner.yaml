@@ -21,6 +21,35 @@ defaults:
   milling_direction: conventional   # climb | conventional
   finishing_allowance: 0.01
   cut_deeper_than_stock: 0.01
+  min_screw_distance: 1.1
+  arc_detection:
+    mode: FOR_PLANNING
+    tolerance: 0.002
+  fixups:
+    replace_invalid_default_tool:
+      enabled: true
+      description: "If the requested default tool cannot fit required features, choose the largest fitting tool and warn."
+    normalize_contour_finishing:
+      enabled: true
+      description: "Merge or repair separate/missing contour finishing settings into the contour operation."
+    accept_reduced_tab_count:
+      enabled: true
+      description: "If target tab count cannot be placed on straight segments, use the tabs that can be placed and warn."
+    skip_roughing_when_finish_fits:
+      enabled: true
+      description: "If roughing allowance makes a near-size hole impossible, skip roughing when the selected tool can still finish the feature."
+    fall_back_to_local_planner:
+      enabled: false
+      description: "If AI planning fails, use deterministic local planner and warn the user."
+    downgrade_pocket_to_profile_when_tool_fits_boundary:
+      enabled: false
+      description: "If a pocket cannot be cleared but its boundary can be profiled, convert to an inside contour and warn."
+  simulation:
+    enabled: true
+    xy_tool_fraction: 0.25
+    z_spacing: 0.02
+    max_grid_cells: 20000000
+    preview: true
   tab_settings:
     enabled: true
     width: 0.2

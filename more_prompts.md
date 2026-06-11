@@ -367,3 +367,29 @@ i think one reason we may be having problems with generating tool ptahs is that 
 
 ok lets start working on creating tool paths for operations. lets start by making the tests and assertions framework.  for each test, we can define a geometry entity and an operation-- that's all we need: we'll just have a lot of them.  we can start with one pyhton file per type of operation. you can just use pydantic models directly to keep these in python.    the tricky part is the assertions. one operation can generate lots of tool paths.  before we figure out how to test this, how does the kiri:moto code test it? 
 
+
+okchanges we need to make. 
+(1)-- move ordering. 
+when we're sorting operations for optimal travel, we already have a rule to try to minimize travel between all of the operations in a given group. But we also have the constraint that tool changes are very expensive. so, we want to perform all of the tasks that need one tool before switching to another.  Whats tough is that this can create rule conflicts-- suppose both screw holes and some other job feature requires a small tool, BUT are in different groups.  In this case, we need to strictly order by tools first.  In practice,e this wil lmean that we always start with whatever tool is used for fixture screws or inside contours before outside contours, which is last. operation ordering is something the user may change, but essentially we should protect tool changes first. that said, this changes a LOT if you have a tool changer, so we need to allow the user to configure this.  
+The solution is to add a operation_sort key in machine config. this is a list of sort priorties. valid values are "tool", "role", "nest_order".  the default is:
+operation_sort:
+  - tool
+  - group
+  - nest_order
+
+this means: to sort by tool first, then by operation group (fixture, part), then by how far the feature is nested ( outer last ). 
+
+
+(2) we have to handle tabs.  these are tricky-- we need to 'hop' over them.  functionally, these must be handled as adjustments to the paths.  depending on the tab height, multiple paths could be affected.  what we wnt to do is just 'hop' over the tab.  Where it gets really tricky is that since you hop over a tab, if ramps are enabled, you must ramp back to the side of the tab you skipped over: so this results in a move sequence like "a) retract to a safe height (b) move to a point along the contour AHEAD of where you need to be (c) ramp down and back, backing up to the tab on the other side (d) continue. I would imagine kiri does this, but check it out.  if ramps are not enabled, its easier, you just retract, move to the point past the tab, and then plunge back down on the back side. 
+
+our job here isn't to place the tabs, just to skip them when they are present.  important notes:
+
+(1) skipping a tab might mean going to a z level you've not done before
+(2) look at kiri for its logic on this.  also look into other cool tricks. 
+
+
+before you implement, look at kiriwhat cool tricks do they use that we should use/emulate?
+
+
+(3) tool selection.
+given a job, we need to select the best tool. the operator might give us the tool, but ideally we want to have a good idea of what to pick.  The scenario i want to support is the one for single-tool machines: assume you need to do the whole job with one tool, and choose the LARGEST single tool that can do the job. Then, accept that screw holes will use this tool.  For me, that typically means a 3/16" tool is selected, because we have a lot of 0.201 inch diameter holes.  If there are any features that need a 1/8" tool, i use a 1/8" tool. Anyway, this is tricky because we need to evaluate all of the model geometry to figure out what the minimum radius needed is. we should code this as  'tool selector'. You can make non-graphical test caess for this.

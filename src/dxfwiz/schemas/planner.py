@@ -24,6 +24,64 @@ class TabSettings(StrictModel):
     spacing: float | None = Field(default=None, gt=0)
 
 
+class ArcDetectionSettings(StrictModel):
+    mode: Literal["OFF", "FOR_PLANNING", "RECOVER"] = "FOR_PLANNING"
+    tolerance: float = Field(default=0.002, ge=0)
+
+
+class FixupSetting(StrictModel):
+    enabled: bool
+    description: str
+
+
+class Fixups(StrictModel):
+    replace_invalid_default_tool: FixupSetting = Field(
+        default_factory=lambda: FixupSetting(
+            enabled=True,
+            description="If the requested default tool cannot fit required features, choose the largest fitting tool and warn.",
+        )
+    )
+    normalize_contour_finishing: FixupSetting = Field(
+        default_factory=lambda: FixupSetting(
+            enabled=True,
+            description="Merge or repair separate/missing contour finishing settings into the contour operation.",
+        )
+    )
+    accept_reduced_tab_count: FixupSetting = Field(
+        default_factory=lambda: FixupSetting(
+            enabled=True,
+            description="If target tab count cannot be placed on straight segments, use the tabs that can be placed and warn.",
+        )
+    )
+    skip_roughing_when_finish_fits: FixupSetting = Field(
+        default_factory=lambda: FixupSetting(
+            enabled=True,
+            description="If roughing allowance makes a near-size hole impossible, skip roughing when the selected tool can still finish the feature.",
+        )
+    )
+    fall_back_to_local_planner: FixupSetting = Field(
+        default_factory=lambda: FixupSetting(
+            enabled=False,
+            description="If AI planning fails, use deterministic local planner and warn the user.",
+        )
+    )
+    downgrade_pocket_to_profile_when_tool_fits_boundary: FixupSetting = Field(
+        default_factory=lambda: FixupSetting(
+            enabled=False,
+            description="If a pocket cannot be cleared but its boundary can be profiled, convert to an inside contour and warn.",
+        )
+    )
+
+
+class SimulationDefaults(StrictModel):
+    enabled: bool = True
+    xy_spacing: float | None = Field(default=None, gt=0)
+    xy_tool_fraction: float = Field(default=0.25, gt=0, le=1)
+    z_spacing: float | None = Field(default=None, gt=0)
+    max_grid_cells: int = Field(default=20_000_000, gt=0)
+    preview: bool = True
+
+
 class Defaults(StrictModel):
     max_tools: int | None = Field(default=None, ge=1)
     coordinate_system: str | None = None
@@ -36,6 +94,10 @@ class Defaults(StrictModel):
     finishing_allowance: float = Field(ge=0)
     cut_deeper_than_stock: float = Field(default=0.0, ge=0)
     screw_spacing: float | None = Field(default=None, gt=0)
+    min_screw_distance: float | None = Field(default=None, gt=0)
+    arc_detection: ArcDetectionSettings = Field(default_factory=ArcDetectionSettings)
+    fixups: Fixups = Field(default_factory=Fixups)
+    simulation: SimulationDefaults = Field(default_factory=SimulationDefaults)
     tab_settings: TabSettings
 
 
