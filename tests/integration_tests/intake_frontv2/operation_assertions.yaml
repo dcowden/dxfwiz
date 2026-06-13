@@ -1,6 +1,7 @@
 total_entities: 43
-drills: 0
-helical_drills: 12
+drills: 12
+helical_contours: 0
+helical_pockets: 0
 generated_screw_holes:
   count: 0
   locations: []

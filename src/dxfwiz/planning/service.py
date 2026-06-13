@@ -18,7 +18,8 @@ from dxfwiz.issues import issue_code
 from dxfwiz.schemas import GeometryFile, JobFile, MachineFile, PlannerFile
 from dxfwiz.schemas.common import StrictModel, Units
 from dxfwiz.schemas.job import JobInfo, Stock
-from dxfwiz.schemas.planner import OperationAdvice
+from dxfwiz.schemas.machine import ScrewWorkholdingMethod, Tool
+from dxfwiz.schemas.planner import OperationAdvice, OperationSettings
 from dxfwiz.planning.yaml_format import dump_operation_yaml
 from dxfwiz.planning.tool_selector import select_largest_single_tool, selected_tool_rejections
 
@@ -46,7 +47,9 @@ class PlannerInputs(StrictModel):
     finishing_allowance: float = Field(default=0.0, ge=0)
     cut_deeper_than_stock: float = Field(default=0.0, ge=0)
     screw_spacing: float | None = Field(default=None, gt=0)
+    ideal_screw_distance: float | None = Field(default=None, gt=0)
     min_screw_distance: float | None = Field(default=None, gt=0)
+    operation_settings: OperationSettings = Field(default_factory=OperationSettings)
     fixups: dict[str, bool] = Field(default_factory=dict)
 
 
@@ -265,7 +268,7 @@ def _normalize_operation_fields(
             "passes": operation.get("finishing", {}).get("passes", 1),
             "milling_direction": operation.get("finishing", {}).get("milling_direction") or "climb",
         }
-    if operation["type"] == "helical_drill":
+    if operation["type"] == "helical_contour":
         operation.setdefault("pitch", depth_per_pass)
         operation.setdefault("milling_direction", milling_direction)
         operation["finishing"] = {
@@ -275,6 +278,27 @@ def _normalize_operation_fields(
             "bottom": False,
             "passes": operation.get("finishing", {}).get("passes", 1),
             "milling_direction": operation.get("finishing", {}).get("milling_direction") or milling_direction,
+        }
+    if operation["type"] == "helical_pocket":
+        operation.setdefault("pitch", depth_per_pass)
+        operation.setdefault("stepover_percent", request.inputs.operation_settings.pocket_stepover_percent)
+        operation.setdefault("prefer_arcs", request.inputs.operation_settings.prefer_arcs)
+        operation.setdefault("milling_direction", milling_direction)
+        operation["roughing"] = {
+            **operation.get("roughing", {}),
+            "enabled": True,
+            "depth_per_pass": depth_per_pass,
+            "side_allowance": operation.get("roughing", {}).get("side_allowance", request.inputs.finishing_allowance),
+            "bottom_allowance": operation.get("roughing", {}).get("bottom_allowance", request.inputs.finishing_allowance),
+            "milling_direction": operation.get("roughing", {}).get("milling_direction", milling_direction),
+        }
+        operation["finishing"] = {
+            **operation.get("finishing", {}),
+            "enabled": bool(operation.get("finishing", {}).get("enabled", True)),
+            "side": True,
+            "bottom": True,
+            "passes": operation.get("finishing", {}).get("passes", 1),
+            "milling_direction": operation.get("finishing", {}).get("milling_direction") or "climb",
         }
     if operation["type"] == "drill":
         operation.setdefault("peck_depth", min(operation["depth"], depth_per_pass))
@@ -486,15 +510,17 @@ def _build_plan(request: PlanningRequest, warnings: list[PlanningIssue]) -> dict
     cut_depth = stock_thickness
 
     if "screws" in inputs.workholding_method:
-        for entity in _screw_entities(request, tool.diameter):
+        screw_tool = _screw_tool(request, tool)
+        screw_hole_diameter = _planned_screw_hole_diameter(request, screw_tool)
+        for entity in _screw_entities(request, screw_hole_diameter):
             generated_entities.append(entity)
             op = _screw_drill_operation(
                 len(operations) + 1,
                 entity["id"],
-                tool.id,
-                min(stock_thickness, tool.depth_per_pass or stock_thickness),
+                screw_tool.id,
+                stock_thickness + _cut_deeper_than_stock(request),
                 machine.machine.clear_z,
-                tool,
+                screw_tool,
             )
             operations.append(op)
             groups["fixtures"].append(op["id"])
@@ -504,7 +530,14 @@ def _build_plan(request: PlanningRequest, warnings: list[PlanningIssue]) -> dict
         if entity is None or node["role"] in {"frame", "ignored", "uncontained"}:
             continue
         if node["role"] == "cutout" and entity.shape != "circle":
-            op = _pocket_operation(len(operations) + 1, entity.id, tool.id, cut_depth, milling_direction)
+            op = _pocket_operation(
+                len(operations) + 1,
+                entity.id,
+                tool.id,
+                cut_depth,
+                milling_direction,
+                inputs.operation_settings,
+            )
             operations.append(op)
             groups["internal_pockets"].append(op["id"])
     for node in nodes:
@@ -600,7 +633,14 @@ def _flatten_nodes(nodes: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return result
 
 
-def _pocket_operation(index: int, entity_id: str, tool_id: str, depth: float, direction: str) -> dict[str, Any]:
+def _pocket_operation(
+    index: int,
+    entity_id: str,
+    tool_id: str,
+    depth: float,
+    direction: str,
+    settings: OperationSettings,
+) -> dict[str, Any]:
     return {
         "id": f"op{index}",
         "type": "pocket",
@@ -608,7 +648,7 @@ def _pocket_operation(index: int, entity_id: str, tool_id: str, depth: float, di
         "entity": entity_id,
         "tool": tool_id,
         "depth": depth,
-        "stepover_percent": 40,
+        "stepover_percent": settings.pocket_stepover_percent,
         "strategy": "offset",
         "roughing": {
             "enabled": True,
@@ -637,7 +677,12 @@ def _hole_operation(
     request: PlanningRequest,
 ) -> dict[str, Any]:
     diameter = entity.diameter or 0
-    op_type = "drill" if diameter <= 0.2 else "helical_drill"
+    settings = request.inputs.operation_settings
+    tool = next((tool for tool in request.machine.tools if tool.id == tool_id), None)
+    tool_diameter = tool.diameter if tool is not None else 0.0
+    max_plug = request.machine.machine.maximum_plug_size
+    helical_max = settings.helical_pocket_max_diameter or settings.helical_drill_max_diameter
+    op_type = _hole_operation_type(diameter, tool_diameter, settings.drill_max_diameter, max_plug, helical_max)
     operation = {
         "id": f"op{index}",
         "type": op_type,
@@ -648,7 +693,7 @@ def _hole_operation(
     }
     if op_type == "drill":
         operation.update({"peck_depth": min(depth, 0.12), "retract_amount": 0.04, "dwell_time": 0.2})
-    else:
+    elif op_type == "helical_contour":
         operation.update(
             {
                 "hole_diameter": diameter,
@@ -665,7 +710,73 @@ def _hole_operation(
                 "lead_in": {"type": "arc", "length": 0.2},
             }
         )
+    elif op_type == "helical_pocket":
+        operation.update(
+            {
+                "hole_diameter": diameter,
+                "pitch": min(depth, 0.08),
+                "stepover_percent": settings.pocket_stepover_percent,
+                "prefer_arcs": settings.prefer_arcs,
+                "milling_direction": direction,
+                "roughing": {
+                    "enabled": True,
+                    "depth_per_pass": 0.08,
+                    "side_allowance": request.inputs.finishing_allowance,
+                    "bottom_allowance": request.inputs.finishing_allowance,
+                    "milling_direction": direction,
+                },
+                "finishing": {
+                    "enabled": True,
+                    "side": True,
+                    "bottom": True,
+                    "passes": 1,
+                    "milling_direction": "climb",
+                },
+                "lead_in": {"type": "ramp", "length": 0.2},
+            }
+        )
+    else:
+        operation.update(
+            {
+                "type": "pocket",
+                "description": f"Pocket large circular cutout {entity.id} ({diameter:.3f})",
+                "strategy": "offset",
+                "stepover_percent": settings.pocket_stepover_percent,
+                "roughing": {
+                    "enabled": True,
+                    "depth_per_pass": 0.08,
+                    "side_allowance": request.inputs.finishing_allowance,
+                    "bottom_allowance": request.inputs.finishing_allowance,
+                    "milling_direction": direction,
+                },
+                "finishing": {
+                    "enabled": True,
+                    "side": True,
+                    "bottom": True,
+                    "passes": 1,
+                    "milling_direction": direction,
+                },
+                "lead_in": {"type": "ramp", "length": 0.2},
+            }
+        )
     return operation
+
+
+def _hole_operation_type(
+    hole_diameter: float,
+    tool_diameter: float,
+    drill_max_diameter: float,
+    max_plug_diameter: float,
+    helical_pocket_max_diameter: float,
+) -> str:
+    if hole_diameter <= drill_max_diameter or math.isclose(hole_diameter, tool_diameter, abs_tol=1e-4):
+        return "drill"
+    plug_diameter = max(0.0, hole_diameter - (2 * tool_diameter))
+    if plug_diameter <= max_plug_diameter:
+        return "helical_contour"
+    if hole_diameter <= helical_pocket_max_diameter:
+        return "helical_pocket"
+    return "pocket"
 
 
 def _contour_operation(
@@ -749,35 +860,87 @@ def _screw_points(request: PlanningRequest) -> list[tuple[float, float]]:
     geometry = request.geometry
     bounds = _frame_or_summary_bounds(geometry)
     min_x, min_y, max_x, max_y = bounds
-    grid = request.machine.machine.screw_grid or request.inputs.screw_spacing
+    screw_workholding = _screw_workholding(request.machine)
+    method_grid = screw_workholding.screw_grid if screw_workholding else None
+    grid = method_grid or request.machine.machine.screw_grid or request.inputs.screw_spacing
     if not grid:
         logger.info("Skipping screw placement because no screw_grid is configured")
         return []
-    clearance = request.machine.machine.screw_clearance or 0.0
-    min_neighbor_distance = request.inputs.min_screw_distance or (grid * 1.01)
+    clearance = (
+        (screw_workholding.screw_clearance if screw_workholding else None)
+        or request.machine.machine.screw_clearance
+        or 0.0
+    )
     stock = box(min_x, min_y, max_x, max_y)
     blocked = _part_clearance_polygons(request, clearance)
+    offset = (
+        screw_workholding.screw_grid_offset
+        if screw_workholding is not None and method_grid is not None
+        else request.machine.machine.screw_grid_offset
+    )
     candidates = [
         point
-        for point in _grid_points(min_x, min_y, max_x, max_y, grid)
+        for point in _grid_points(min_x, min_y, max_x, max_y, grid, (offset.x, offset.y))
         if _point_in_stock_scrap(point, stock, blocked)
     ]
     candidates = _unique_points(candidates)
-    target_spacing = request.inputs.screw_spacing or _default_screw_spacing(request)
-    selected = _select_screw_points_from_grid(candidates, bounds, target_spacing)
-    selected = _add_missing_screw_neighbors(selected, candidates, min_neighbor_distance)
-    return _points_with_near_neighbor(_unique_points(selected), min_neighbor_distance)
+    ideal_spacing = _ideal_screw_distance(request)
+    selected = _select_screw_points_from_grid(candidates, stock, bounds, ideal_spacing, grid)
+    return _unique_points(selected)
+
+
+def _screw_workholding(machine: MachineFile) -> ScrewWorkholdingMethod | None:
+    for method in machine.machine.workholding.supported_methods:
+        if isinstance(method, ScrewWorkholdingMethod):
+            return method
+    return None
+
+
+def _screw_tool(request: PlanningRequest, selected_tool: Tool) -> Tool:
+    screw_workholding = _screw_workholding(request.machine)
+    if screw_workholding is None or screw_workholding.allow_oversized_holes_to_prevent_toolchange:
+        return selected_tool
+    screw_diameter = screw_workholding.screw_hole_diameter
+    fitting_tools = [tool for tool in request.machine.tools if tool.diameter <= screw_diameter + 1e-9]
+    if fitting_tools:
+        return max(fitting_tools, key=lambda tool: tool.diameter)
+    return selected_tool
+
+
+def _planned_screw_hole_diameter(request: PlanningRequest, screw_tool: Tool) -> float:
+    screw_workholding = _screw_workholding(request.machine)
+    target = screw_workholding.screw_hole_diameter if screw_workholding else screw_tool.diameter
+    if screw_workholding is None or screw_workholding.allow_oversized_holes_to_prevent_toolchange:
+        return max(target, screw_tool.diameter)
+    return target
 
 
 def _default_screw_spacing(request: PlanningRequest) -> float:
     return 12.0 if request.geometry.units.length == "in" else 300.0
 
 
-def _grid_points(min_x: float, min_y: float, max_x: float, max_y: float, spacing: float) -> list[tuple[float, float]]:
+def _ideal_screw_distance(request: PlanningRequest) -> float:
+    return (
+        request.inputs.ideal_screw_distance
+        or request.inputs.screw_spacing
+        or request.inputs.min_screw_distance
+        or _default_screw_spacing(request)
+    )
+
+
+def _grid_points(
+    min_x: float,
+    min_y: float,
+    max_x: float,
+    max_y: float,
+    spacing: float,
+    offset: tuple[float, float] = (0.0, 0.0),
+) -> list[tuple[float, float]]:
     points: list[tuple[float, float]] = []
-    x = min_x
+    x_offset, y_offset = offset
+    x = x_offset + math.floor((min_x - x_offset) / spacing) * spacing
     while x <= max_x + spacing + 1e-9:
-        y = min_y
+        y = y_offset + math.floor((min_y - y_offset) / spacing) * spacing
         while y <= max_y + spacing + 1e-9:
             points.append((round(x, 6), round(y, 6)))
             y += spacing
@@ -794,80 +957,131 @@ def _point_in_stock_scrap(point: tuple[float, float], stock: Polygon, blocked) -
     return not blocked.covers(location)
 
 
-def _points_with_near_neighbor(points: list[tuple[float, float]], max_distance: float) -> list[tuple[float, float]]:
-    if len(points) < 2:
-        return []
-    threshold = max_distance + 1e-9
-    result = []
-    for index, point in enumerate(points):
-        if any(_distance(point, other) <= threshold for other_index, other in enumerate(points) if other_index != index):
-            result.append(point)
-    return result
-
-
 def _select_screw_points_from_grid(
     candidates: list[tuple[float, float]],
+    stock: Polygon,
     bounds: tuple[float, float, float, float],
-    spacing: float,
+    ideal_spacing: float,
+    screw_grid: float,
 ) -> list[tuple[float, float]]:
     if not candidates:
         return []
     min_x, min_y, max_x, max_y = bounds
-    target_points = [
-        (x, y)
-        for x in _target_values(min_x, max_x, spacing)
-        for y in _target_values(min_y, max_y, spacing)
-    ]
-    selected: list[tuple[float, float]] = []
-    available = list(candidates)
-    for target in target_points:
-        point = min(available, key=lambda candidate: _distance(candidate, target))
-        if _distance(point, target) <= spacing * 0.75:
+    candidate_set = set(candidates)
+    selected = _corner_screw_points(candidates, bounds, screw_grid)
+    coverage_radius = ideal_spacing / 2
+    uncovered = set(_coverage_sample_points(stock, bounds, coverage_radius))
+    if not uncovered:
+        return selected
+    uncovered = _remove_covered(uncovered, selected, coverage_radius)
+    max_extra = max(0, min(len(candidates), math.ceil(stock.area / max(ideal_spacing * ideal_spacing, 1e-9)) * 4 + 8))
+    center = ((min_x + max_x) / 2, (min_y + max_y) / 2)
+    while uncovered and len(selected) < max_extra:
+        existing = set(selected)
+        best = max(
+            (point for point in candidate_set if point not in existing),
+            key=lambda point: _screw_candidate_score(point, uncovered, selected, center, bounds, coverage_radius),
+            default=None,
+        )
+        if best is None:
+            break
+        covered_by_best = _covered_points(uncovered, best, coverage_radius)
+        if not covered_by_best:
+            break
+        selected.append(best)
+        uncovered.difference_update(covered_by_best)
+    return _unique_points(selected)
+
+
+def _corner_screw_points(
+    candidates: list[tuple[float, float]],
+    bounds: tuple[float, float, float, float],
+    screw_grid: float,
+) -> list[tuple[float, float]]:
+    min_x, min_y, max_x, max_y = bounds
+    corners = [(min_x, min_y), (min_x, max_y), (max_x, min_y), (max_x, max_y)]
+    selected = []
+    for corner in corners:
+        point = min(candidates, key=lambda candidate: _distance(candidate, corner))
+        if _distance(point, corner) <= screw_grid * 1.5:
             selected.append(point)
     return _unique_points(selected)
 
 
-def _target_values(start: float, end: float, spacing: float) -> list[float]:
-    values = [start]
-    value = start + spacing
-    while value < end - spacing * 0.25:
-        values.append(value)
-        value += spacing
-    if end - values[-1] > spacing * 0.25:
-        values.append(end)
-    return values
-
-
-def _add_missing_screw_neighbors(
-    selected: list[tuple[float, float]],
-    candidates: list[tuple[float, float]],
-    max_distance: float,
+def _coverage_sample_points(
+    stock: Polygon,
+    bounds: tuple[float, float, float, float],
+    ideal_spacing: float,
 ) -> list[tuple[float, float]]:
-    result = list(selected)
-    selected_keys = {(round(x, 6), round(y, 6)) for x, y in result}
+    min_x, min_y, max_x, max_y = bounds
+    sample_spacing = max(ideal_spacing / 4, min(max_x - min_x, max_y - min_y, ideal_spacing) / 12, 1e-6)
+    points: list[tuple[float, float]] = []
+    x = min_x
+    while x <= max_x + 1e-9:
+        y = min_y
+        while y <= max_y + 1e-9:
+            point = (round(min(x, max_x), 6), round(min(y, max_y), 6))
+            if stock.covers(Point(point)):
+                points.append(point)
+            y += sample_spacing
+        x += sample_spacing
+    points.extend([(min_x, min_y), (min_x, max_y), (max_x, min_y), (max_x, max_y), ((min_x + max_x) / 2, (min_y + max_y) / 2)])
+    return _unique_points(points)
+
+
+def _remove_covered(
+    sample_points: set[tuple[float, float]],
+    selected: list[tuple[float, float]],
+    radius: float,
+) -> set[tuple[float, float]]:
+    result = set(sample_points)
     for point in selected:
-        if _has_neighbor(point, result, max_distance):
-            continue
-        neighbors = [
-            candidate
-            for candidate in candidates
-            if (round(candidate[0], 6), round(candidate[1], 6)) not in selected_keys
-            and 0 < _distance(point, candidate) <= max_distance + 1e-9
-        ]
-        if not neighbors:
-            continue
-        neighbor = min(neighbors, key=lambda candidate: _distance(point, candidate))
-        result.append(neighbor)
-        selected_keys.add((round(neighbor[0], 6), round(neighbor[1], 6)))
+        result.difference_update(_covered_points(result, point, radius))
     return result
 
 
-def _has_neighbor(point: tuple[float, float], points: list[tuple[float, float]], max_distance: float) -> bool:
-    return any(point != other and _distance(point, other) <= max_distance + 1e-9 for other in points)
+def _covered_points(
+    sample_points: set[tuple[float, float]],
+    candidate: tuple[float, float],
+    radius: float,
+) -> set[tuple[float, float]]:
+    radius_sq = radius * radius
+    return {point for point in sample_points if _distance_sq(point, candidate) <= radius_sq + 1e-9}
+
+
+def _screw_candidate_score(
+    candidate: tuple[float, float],
+    uncovered: set[tuple[float, float]],
+    selected: list[tuple[float, float]],
+    center: tuple[float, float],
+    bounds: tuple[float, float, float, float],
+    coverage_radius: float,
+) -> float:
+    covered = _covered_points(uncovered, candidate, coverage_radius)
+    if not covered:
+        return -1e9
+    min_x, min_y, max_x, max_y = bounds
+    diagonal = max(_distance((min_x, min_y), (max_x, max_y)), 1e-9)
+    nearest_selected = min((_distance(candidate, point) for point in selected), default=coverage_radius)
+    spacing_factor = min(nearest_selected / max(coverage_radius, 1e-9), 1.0)
+    centrality = 1.0 - min(_distance(candidate, center) / diagonal, 1.0)
+    edge_distance = min(candidate[0] - min_x, max_x - candidate[0], candidate[1] - min_y, max_y - candidate[1])
+    edge_factor = min(max(edge_distance, 0.0) / max(coverage_radius / 2, 1e-9), 1.0)
+    return (
+        len(covered) * 1000
+        + spacing_factor * 30
+        + centrality * 10
+        + edge_factor * 5
+        - max(0.0, (coverage_radius * 0.4) - nearest_selected) * 20
+    )
 
 
 def _distance(first: tuple[float, float], second: tuple[float, float]) -> float:
     return math.hypot(first[0] - second[0], first[1] - second[1])
+
+
+def _distance_sq(first: tuple[float, float], second: tuple[float, float]) -> float:
+    return (first[0] - second[0]) ** 2 + (first[1] - second[1]) ** 2
 
 
 def _part_clearance_polygons(request: PlanningRequest, clearance: float):

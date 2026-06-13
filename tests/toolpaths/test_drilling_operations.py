@@ -3,9 +3,9 @@ from pathlib import Path
 import pytest
 
 from dxfwiz.schemas.common import Point2D
-from dxfwiz.schemas.job import DrillOperation, HelicalDrillOperation
+from dxfwiz.schemas.job import DrillOperation, HelicalContourOperation, HelicalPocketOperation
 from dxfwiz.schemas.machine import Tool
-from dxfwiz.toolpaths.drilling import drill_operation_to_toolpaths, helical_drill_operation_to_toolpaths
+from dxfwiz.toolpaths.drilling import drill_operation_to_toolpaths, helical_contour_operation_to_toolpaths, helical_pocket_operation_to_toolpaths
 from dxfwiz.toolpaths.operations import render_toolpath_preview_sheet_svg
 from dxfwiz.toolpaths.model import SourceArcSegment, SourcePath
 
@@ -44,11 +44,11 @@ def test_drill_operation_generates_vertical_peck_moves_only():
     PREVIEWS.append(("test_drill_operation_generates_vertical_peck_moves_only", circle_source_path("e-hole", (1.0, 1.0), 0.125), passes))
 
 
-def test_helical_drill_uses_arc_moves_for_rough_and_finish():
-    operation = HelicalDrillOperation.model_validate(
+def test_helical_contour_uses_arc_moves_for_rough_and_finish():
+    operation = HelicalContourOperation.model_validate(
         {
             "id": "op-helix",
-            "type": "helical_drill",
+            "type": "helical_contour",
             "entity": "e-bore",
             "tool": "t5",
             "depth": 0.26,
@@ -65,7 +65,7 @@ def test_helical_drill_uses_arc_moves_for_rough_and_finish():
     )
     tool = make_test_tool(diameter=0.25, depth_per_pass=0.08)
 
-    passes = helical_drill_operation_to_toolpaths(
+    passes = helical_contour_operation_to_toolpaths(
         operation,
         center=(1.0, 1.0),
         hole_diameter=0.75,
@@ -74,7 +74,7 @@ def test_helical_drill_uses_arc_moves_for_rough_and_finish():
         finishing_allowance=0.01,
     )
 
-    assert [toolpath_pass.kind for toolpath_pass in passes] == ["helical_drill", "finish_contour"]
+    assert [toolpath_pass.kind for toolpath_pass in passes] == ["helical_contour", "finish_contour"]
     rough_arcs = [move for move in passes[0].moves if move.type == "arc"]
     finish_arcs = [move for move in passes[1].moves if move.type == "arc"]
     assert rough_arcs
@@ -83,14 +83,14 @@ def test_helical_drill_uses_arc_moves_for_rough_and_finish():
     assert rough_arcs[-1].z == pytest.approx(-0.26)
     assert finish_arcs[0].z == pytest.approx(-0.26)
     assert passes[0].warnings == []
-    PREVIEWS.append(("test_helical_drill_uses_arc_moves_for_rough_and_finish", circle_source_path("e-bore", (1.0, 1.0), 0.75), passes))
+    PREVIEWS.append(("test_helical_contour_uses_arc_moves_for_rough_and_finish", circle_source_path("e-bore", (1.0, 1.0), 0.75), passes))
 
 
-def test_helical_drill_warns_when_interior_slug_is_large():
-    operation = HelicalDrillOperation.model_validate(
+def test_helical_contour_warns_when_interior_slug_is_large():
+    operation = HelicalContourOperation.model_validate(
         {
             "id": "op-large-bore",
-            "type": "helical_drill",
+            "type": "helical_contour",
             "entity": "e-large-bore",
             "tool": "t5",
             "depth": 0.25,
@@ -101,7 +101,7 @@ def test_helical_drill_warns_when_interior_slug_is_large():
     )
     tool = make_test_tool(diameter=0.25, depth_per_pass=0.08)
 
-    passes = helical_drill_operation_to_toolpaths(
+    passes = helical_contour_operation_to_toolpaths(
         operation,
         center=(1.0, 1.0),
         hole_diameter=2.0,
@@ -109,18 +109,18 @@ def test_helical_drill_warns_when_interior_slug_is_large():
         safe_z=0.5,
     )
 
-    assert passes[0].kind == "helical_drill"
+    assert passes[0].kind == "helical_contour"
     assert passes[0].warnings
     assert "slug" in passes[0].warnings[0]
     assert any(move.type == "arc" for move in passes[0].moves)
-    PREVIEWS.append(("test_helical_drill_warns_when_interior_slug_is_large", circle_source_path("e-large-bore", (1.0, 1.0), 2.0), passes))
+    PREVIEWS.append(("test_helical_contour_warns_when_interior_slug_is_large", circle_source_path("e-large-bore", (1.0, 1.0), 2.0), passes))
 
 
-def test_helical_drill_warns_when_tool_is_too_large():
-    operation = HelicalDrillOperation.model_validate(
+def test_helical_contour_warns_when_tool_is_too_large():
+    operation = HelicalContourOperation.model_validate(
         {
             "id": "op-too-small",
-            "type": "helical_drill",
+            "type": "helical_contour",
             "entity": "e-too-small",
             "tool": "t5",
             "depth": 0.25,
@@ -131,7 +131,7 @@ def test_helical_drill_warns_when_tool_is_too_large():
     )
     tool = make_test_tool(diameter=0.5, depth_per_pass=0.08)
 
-    passes = helical_drill_operation_to_toolpaths(
+    passes = helical_contour_operation_to_toolpaths(
         operation,
         center=(1.0, 1.0),
         hole_diameter=0.4,
@@ -141,7 +141,64 @@ def test_helical_drill_warns_when_tool_is_too_large():
 
     assert passes[0].warnings
     assert passes[0].moves == []
-    PREVIEWS.append(("test_helical_drill_warns_when_tool_is_too_large", circle_source_path("e-too-small", (1.0, 1.0), 0.4), passes))
+    PREVIEWS.append(("test_helical_contour_warns_when_tool_is_too_large", circle_source_path("e-too-small", (1.0, 1.0), 0.4), passes))
+
+
+def test_helical_pocket_prefer_arcs_uses_arc_moves_for_rough_and_finish():
+    operation = HelicalPocketOperation.model_validate(
+        {
+            "id": "op-helical-pocket",
+            "type": "helical_pocket",
+            "entity": "e-pocket",
+            "tool": "t5",
+            "depth": 0.25,
+            "hole_diameter": 1.25,
+            "pitch": 0.08,
+            "stepover_percent": 40,
+            "prefer_arcs": True,
+            "milling_direction": "climb",
+            "roughing": {
+                "enabled": True,
+                "depth_per_pass": 0.08,
+                "side_allowance": 0.01,
+                "bottom_allowance": 0.0,
+                "milling_direction": "climb",
+            },
+            "finishing": {"enabled": True, "side": True, "bottom": True, "passes": 1, "milling_direction": "climb"},
+        }
+    )
+    tool = make_test_tool(diameter=0.25, depth_per_pass=0.08)
+
+    passes = helical_pocket_operation_to_toolpaths(
+        operation,
+        center=(1.0, 1.0),
+        hole_diameter=1.25,
+        tool=tool,
+        safe_z=0.5,
+    )
+
+    assert [toolpath_pass.kind for toolpath_pass in passes] == ["helical_pocket", "finish_contour"]
+    rough_xy_lines = [
+        move for move in passes[0].moves
+        if move.type == "line" and (move.x is not None or move.y is not None)
+    ]
+    rough_arcs = [move for move in passes[0].moves if move.type == "arc"]
+    rough_rapid_moves = [move for move in passes[0].moves if move.type == "rapid"]
+    finish_rapid_moves = [move for move in passes[1].moves if move.type == "rapid"]
+    finish_entry_moves = [move for move in passes[1].moves[:1] if move.type == "line"]
+    assert rough_xy_lines == []
+    assert len(rough_arcs) >= 8
+    arc_radii = [round((move.i ** 2 + move.j ** 2) ** 0.5, 4) for move in rough_arcs]
+    assert len(set(arc_radii)) > 3
+    assert passes[0].moves[-1].type == "arc"
+    assert len(rough_rapid_moves) == 1
+    assert finish_rapid_moves[-1].z == pytest.approx(0.5)
+    assert finish_entry_moves[0].z == pytest.approx(-0.25)
+    assert finish_entry_moves[0].x is not None
+    assert finish_entry_moves[0].y is not None
+    assert any(move.type == "arc" and move.z == pytest.approx(-0.25) for move in passes[1].moves)
+    assert not passes[0].warnings
+    PREVIEWS.append(("test_helical_pocket_prefer_arcs_uses_arc_moves_for_rough_and_finish", circle_source_path("e-pocket", (1.0, 1.0), 1.25), passes))
 
 
 def circle_source_path(entity: str, center: tuple[float, float], diameter: float) -> SourcePath:

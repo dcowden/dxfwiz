@@ -87,7 +87,7 @@ class ContourOperation(BaseOperation):
 
 class PocketOperation(BaseOperation):
     type: Literal["pocket"]
-    strategy: Literal["offset", "raster"] = "offset"
+    strategy: Literal["offset", "raster", "adaptive"] = "offset"
     stepover_percent: float = Field(gt=0, le=100)
     roughing: Roughing
     finishing: Finishing = Field(default_factory=lambda: Finishing(enabled=True, side=True, bottom=True))
@@ -101,13 +101,25 @@ class DrillOperation(BaseOperation):
     dwell_time: float | None = Field(default=None, ge=0)
 
 
-class HelicalDrillOperation(BaseOperation):
-    type: Literal["helical_drill"]
+class HelicalContourOperation(BaseOperation):
+    type: Literal["helical_contour"]
     hole_diameter: float | None = Field(default=None, gt=0)
     pitch: float = Field(gt=0)
     milling_direction: Literal["climb", "conventional"]
     skip_roughing_when_finish_fits: bool = True
     finishing: Finishing = Field(default_factory=lambda: Finishing(enabled=True, side=True, bottom=False))
+    lead_in: LeadIn | None = None
+
+
+class HelicalPocketOperation(BaseOperation):
+    type: Literal["helical_pocket"]
+    hole_diameter: float = Field(gt=0)
+    pitch: float = Field(gt=0)
+    stepover_percent: float = Field(gt=0, le=100)
+    prefer_arcs: bool = True
+    roughing: Roughing
+    finishing: Finishing = Field(default_factory=lambda: Finishing(enabled=True, side=True, bottom=True))
+    milling_direction: Literal["climb", "conventional"]
     lead_in: LeadIn | None = None
 
 
@@ -135,7 +147,7 @@ class MoveOperation(StrictModel):
 
 
 Operation = Annotated[
-    ContourOperation | PocketOperation | DrillOperation | HelicalDrillOperation | TraceOperation | MoveOperation,
+    ContourOperation | PocketOperation | DrillOperation | HelicalContourOperation | HelicalPocketOperation | TraceOperation | MoveOperation,
     Field(discriminator="type"),
 ]
 

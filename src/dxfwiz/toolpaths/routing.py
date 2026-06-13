@@ -53,7 +53,7 @@ def route_passes_within_groups(
     for _bucket_key, candidates in _operation_buckets(operations, sort_priorities):
         ordered = _nearest_neighbor_order(candidates, current_xy)
         for candidate in ordered:
-            safe_passes = [_ensure_safe_z_exit(toolpath_pass, safe_z) for toolpath_pass in candidate.passes]
+            safe_passes = _ensure_safe_z_exits(candidate.passes, safe_z)
             safe_passes = _prepend_operation_link(safe_passes, current_xy, safe_z)
             routed.extend(safe_passes)
             current_xy = _operation_end_xy(safe_passes) or current_xy
@@ -143,7 +143,7 @@ def _role_from_passes(passes: Sequence[ToolpathPass]) -> str:
     kind = next((toolpath_pass.kind for toolpath_pass in passes), "")
     if kind == "peck_drill":
         return "hole"
-    if kind == "helical_drill":
+    if kind in {"helical_contour", "helical_pocket"}:
         return "hole"
     if kind.startswith("pocket"):
         return "pocket"
@@ -188,6 +188,31 @@ def _ensure_safe_z_exit(toolpath_pass: ToolpathPass, safe_z: float) -> ToolpathP
     if _ends_at_safe_z(toolpath_pass.moves, safe_z):
         return toolpath_pass
     return toolpath_pass.model_copy(update={"moves": [*toolpath_pass.moves, RapidMove(type="rapid", z=safe_z)]})
+
+
+def _ensure_safe_z_exits(passes: Sequence[ToolpathPass], safe_z: float) -> list[ToolpathPass]:
+    safe_passes: list[ToolpathPass] = []
+    for index, toolpath_pass in enumerate(passes):
+        next_pass = passes[index + 1] if index + 1 < len(passes) else None
+        if next_pass is not None and _can_feed_link_to_next_pass(next_pass):
+            safe_passes.append(toolpath_pass)
+        else:
+            safe_passes.append(_ensure_safe_z_exit(toolpath_pass, safe_z))
+    return safe_passes
+
+
+def _can_feed_link_to_next_pass(toolpath_pass: ToolpathPass) -> bool:
+    first_motion = _first_motion(toolpath_pass.moves)
+    return first_motion is not None and not isinstance(first_motion, RapidMove)
+
+
+def _first_motion(moves: Sequence[ToolpathMove]) -> ToolpathMove | None:
+    for move in moves:
+        if isinstance(move, (RapidMove,)):
+            return move
+        if getattr(move, "type", None) in {"line", "arc"}:
+            return move
+    return None
 
 
 def _prepend_operation_link(

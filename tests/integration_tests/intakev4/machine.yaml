@@ -10,7 +10,9 @@ machine:
   max_tools: 1          # 1 means no tool changer; >1 means changer capacity
   clear_z: 0.25
   screw_grid: 0.75
+  screw_grid_offset: {x: 0, y: 0}
   screw_clearance: 0.3
+  maximum_plug_size: 0.25
   operation_sort: [tool, group, nest_order]
   workholding: [clamps, screws, tape]
   part_holding: [onionskin, tabs]

@@ -14,13 +14,14 @@ from dxfwiz.schemas.common import Point2D
 from dxfwiz.schemas.job import (
     ContourOperation,
     DrillOperation,
-    HelicalDrillOperation,
+    HelicalContourOperation,
+    HelicalPocketOperation,
     JobFile,
     MoveOperation,
     Operation,
     PocketOperation,
 )
-from dxfwiz.toolpaths.drilling import drill_operation_to_toolpaths, helical_drill_operation_to_toolpaths
+from dxfwiz.toolpaths.drilling import drill_operation_to_toolpaths, helical_contour_operation_to_toolpaths, helical_pocket_operation_to_toolpaths
 from dxfwiz.toolpaths.model import SourceArcSegment, SourceLineSegment, SourcePath, ToolpathPass, ToolpathPlan
 from dxfwiz.toolpaths.moves import move_operation_to_toolpaths
 from dxfwiz.toolpaths.operations import contour_operation_to_toolpaths
@@ -101,12 +102,12 @@ def _operation_to_passes(operation: Operation, resolver: "GeometryResolver", too
         if center is None:
             return [_warning_pass(operation, tool, f"{operation.id}: cannot find drill center for {operation.entity}")]
         return drill_operation_to_toolpaths(operation, center, tool, safe_z)
-    if isinstance(operation, HelicalDrillOperation):
+    if isinstance(operation, HelicalContourOperation):
         center = resolver.center(operation.entity)
         diameter = operation.hole_diameter or resolver.diameter(operation.entity)
         if center is None or diameter is None:
-            return [_warning_pass(operation, tool, f"{operation.id}: cannot find helical drill geometry for {operation.entity}")]
-        return helical_drill_operation_to_toolpaths(operation, center, diameter, tool, safe_z)
+            return [_warning_pass(operation, tool, f"{operation.id}: cannot find helical contour geometry for {operation.entity}")]
+        return helical_contour_operation_to_toolpaths(operation, center, diameter, tool, safe_z)
     if isinstance(operation, ContourOperation):
         source_path = resolver.source_path(operation.entity)
         if source_path is None:
@@ -117,6 +118,17 @@ def _operation_to_passes(operation: Operation, resolver: "GeometryResolver", too
         if source_path is None:
             return [_warning_pass(operation, tool, f"{operation.id}: pocket entity {operation.entity} has no usable path")]
         return pocket_operation_to_toolpaths(operation, source_path, tool, safe_z)
+    if isinstance(operation, HelicalPocketOperation):
+        source_path = resolver.source_path(operation.entity)
+        if source_path is None:
+            return [_warning_pass(operation, tool, f"{operation.id}: helical pocket entity {operation.entity} has no usable path")]
+        if operation.prefer_arcs:
+            center = resolver.center(operation.entity)
+            diameter = operation.hole_diameter or resolver.diameter(operation.entity)
+            if center is None or diameter is None:
+                return [_warning_pass(operation, tool, f"{operation.id}: cannot find helical pocket circle geometry for {operation.entity}")]
+            return helical_pocket_operation_to_toolpaths(operation, center, diameter, tool, safe_z)
+        return pocket_operation_to_toolpaths(_helical_pocket_as_pocket(operation), source_path, tool, safe_z)
     return [_warning_pass(operation, tool, f"{operation.id}: operation type {operation.type} is not implemented")]
 
 
@@ -186,7 +198,7 @@ def _warning_pass(operation: Operation, tool, warning: str) -> ToolpathPass:
 
 
 def _operation_role(operation: Operation) -> str:
-    if operation.type in {"drill", "helical_drill"}:
+    if operation.type in {"drill", "helical_contour", "helical_pocket"}:
         return "hole"
     if operation.type == "pocket":
         return "pocket"
@@ -218,13 +230,24 @@ def _nest_order_by_entity(geometry: GeometryFile) -> dict[str, int]:
 
 
 def _fallback_operation_nest_order(operation: Operation) -> int:
-    if operation.type in {"drill", "helical_drill"}:
+    if operation.type in {"drill", "helical_contour", "helical_pocket"}:
         return 0
     if operation.type == "pocket":
         return 1
     if operation.type == "contour":
         return 2
     return 1
+
+
+def _helical_pocket_as_pocket(operation: HelicalPocketOperation) -> PocketOperation:
+    data = operation.model_dump(mode="json", exclude_none=True)
+    for key in ("hole_diameter", "pitch", "milling_direction", "prefer_arcs"):
+        data.pop(key, None)
+    data["type"] = "pocket"
+    data["strategy"] = "offset"
+    return PocketOperation.model_validate(
+        data
+    )
 
 
 class GeometryResolver:
@@ -334,6 +357,10 @@ def _dxf_source_path(entity_id: str, dxf_entity, refs, scale: float) -> SourcePa
             float(dxf_entity.dxf.radius) * 2 * scale,
             refs,
         )
+    if dxf_entity.dxftype() == "LWPOLYLINE":
+        return _lwpolyline_source_path(entity_id, dxf_entity, refs, scale)
+    if dxf_entity.dxftype() == "POLYLINE" and dxf_entity.is_2d_polyline:
+        return _polyline_source_path(entity_id, dxf_entity, refs, scale)
     try:
         points = [
             Point2D(x=float(vertex.x) * scale, y=float(vertex.y) * scale)
@@ -348,6 +375,81 @@ def _dxf_source_path(entity_id: str, dxf_entity, refs, scale: float) -> SourcePa
     if closed:
         points = points[:-1]
     return _source_path_from_points(entity_id, points, list(refs), closed=closed)
+
+
+def _lwpolyline_source_path(entity_id: str, dxf_entity, refs, scale: float) -> SourcePath | None:
+    points = [(float(x) * scale, float(y) * scale, float(bulge)) for x, y, bulge in dxf_entity.get_points("xyb")]
+    return _bulged_points_source_path(entity_id, points, list(refs), closed=dxf_entity.closed)
+
+
+def _polyline_source_path(entity_id: str, dxf_entity, refs, scale: float) -> SourcePath | None:
+    points = [
+        (
+            float(vertex.dxf.location.x) * scale,
+            float(vertex.dxf.location.y) * scale,
+            float(vertex.dxf.bulge) if vertex.dxf.hasattr("bulge") else 0.0,
+        )
+        for vertex in dxf_entity.vertices
+    ]
+    return _bulged_points_source_path(entity_id, points, list(refs), closed=dxf_entity.is_closed)
+
+
+def _bulged_points_source_path(
+    entity_id: str,
+    points: list[tuple[float, float, float]],
+    refs,
+    closed: bool,
+) -> SourcePath | None:
+    if len(points) < 2:
+        return None
+    segments = []
+    end_index = len(points) if closed else len(points) - 1
+    for index in range(end_index):
+        start = points[index]
+        end = points[(index + 1) % len(points)]
+        start_point = Point2D(x=start[0], y=start[1])
+        end_point = Point2D(x=end[0], y=end[1])
+        arc = _bulge_arc_segment(start_point, end_point, start[2])
+        if arc is not None:
+            segments.append(arc)
+        else:
+            segments.append(SourceLineSegment(type="line", start=start_point, end=end_point))
+    return SourcePath(
+        id=f"path-{entity_id}",
+        entity=entity_id,
+        closed=closed,
+        segments=segments,
+        source_refs=list(refs),
+    )
+
+
+def _bulge_arc_segment(start: Point2D, end: Point2D, bulge: float) -> SourceArcSegment | None:
+    if abs(bulge) <= 1e-12:
+        return None
+    dx = end.x - start.x
+    dy = end.y - start.y
+    chord = math.hypot(dx, dy)
+    if chord <= 1e-12:
+        return None
+    radius = chord * (1 + bulge * bulge) / (4 * abs(bulge))
+    half_chord = chord / 2
+    center_offset = math.sqrt(max(radius * radius - half_chord * half_chord, 0.0))
+    mid_x = (start.x + end.x) / 2
+    mid_y = (start.y + end.y) / 2
+    normal_x = -dy / chord
+    normal_y = dx / chord
+    if bulge < 0:
+        normal_x = -normal_x
+        normal_y = -normal_y
+    center = Point2D(x=mid_x + normal_x * center_offset, y=mid_y + normal_y * center_offset)
+    return SourceArcSegment(
+        type="arc",
+        start=start,
+        end=end,
+        center=center,
+        radius=radius,
+        direction="ccw" if bulge > 0 else "cw",
+    )
 
 
 def _source_path_from_points(entity_id: str, points: list[Point2D], refs, closed: bool) -> SourcePath:

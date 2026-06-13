@@ -1,5 +1,5 @@
 from dxfwiz.toolpaths.service import ToolpathRequest, ToolpathResponse, generate_toolpaths
-from dxfwiz.toolpaths.drilling import drill_operation_to_toolpaths, helical_drill_operation_to_toolpaths
+from dxfwiz.toolpaths.drilling import drill_operation_to_toolpaths, helical_contour_operation_to_toolpaths, helical_pocket_operation_to_toolpaths
 from dxfwiz.toolpaths.moves import move_operation_to_toolpaths
 from dxfwiz.toolpaths.operations import (
     assert_mostly_offset,
@@ -68,7 +68,8 @@ __all__ = [
     "contour_operation_to_toolpaths",
     "drill_operation_to_toolpaths",
     "generate_toolpaths",
-    "helical_drill_operation_to_toolpaths",
+    "helical_contour_operation_to_toolpaths",
+    "helical_pocket_operation_to_toolpaths",
     "move_operation_to_toolpaths",
     "offset_distance_statistics",
     "offset_source_path",

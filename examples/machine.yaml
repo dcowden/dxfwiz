@@ -8,11 +8,20 @@ machine:
   type: router          # router | laser | plasma
   axes: 3
   max_tools: 1          # 1 means no tool changer; >1 means changer capacity
+  separate_nc_file_per_tool: true
   clear_z: 0.25
-  screw_grid: 0.75
-  screw_clearance: 0.3
+  maximum_plug_size: 0.25
   operation_sort: [tool, group, nest_order]
-  workholding: [clamps, screws, tape]
+  workholding:
+    supported_methods:
+      - method: clamps
+      - method: screws
+        screw_hole_diameter: 0.125
+        screw_grid: 0.75
+        screw_grid_offset: {x: 0, y: 0}
+        screw_clearance: 0.3
+        allow_oversized_holes_to_prevent_toolchange: true
+      - method: tape
   part_holding: [onionskin, tabs]
   work_envelope:
     x: { min: 0, max: 96 }

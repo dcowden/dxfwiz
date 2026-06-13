@@ -35,6 +35,7 @@ class ToolpathResponse(StrictModel):
     warnings: list[ToolpathIssue] = Field(default_factory=list)
     plan: ToolpathPlan | None = None
     gcode: str = ""
+    gcode_files: dict[str, str] = Field(default_factory=dict)
 
 
 def generate_toolpaths(request: ToolpathRequest) -> ToolpathResponse:
@@ -48,12 +49,14 @@ def generate_toolpaths(request: ToolpathRequest) -> ToolpathResponse:
         )
         post = UccncPost(precision=3 if request.job.units.length == "in" else 2)
         gcode = post.render(plan)
+        gcode_files = _split_gcode_files_by_tool(request, plan, post)
     except Exception as exc:
         logger.exception("Toolpath generation failed")
         return ToolpathResponse(
             errors=[ToolpathIssue(code=issue_code("toolpath_generation_failed"), message=str(exc))],
             warnings=[],
             gcode="",
+            gcode_files={},
         )
     issues = [
         ToolpathIssue(code=classify_toolpath_warning(message), message=message)
@@ -64,4 +67,54 @@ def generate_toolpaths(request: ToolpathRequest) -> ToolpathResponse:
         warnings=[issue for issue in issues if issue.code.startswith("W")],
         plan=plan,
         gcode=gcode,
+        gcode_files=gcode_files,
     )
+
+
+def _split_gcode_files_by_tool(request: ToolpathRequest, plan: ToolpathPlan, post: UccncPost) -> dict[str, str]:
+    if not request.machine.machine.separate_nc_file_per_tool:
+        return {}
+    tools = _tools_used_in_plan(plan)
+    if len(tools) <= 1:
+        return {}
+    result: dict[str, str] = {}
+    for tool_id in tools:
+        tool_plan = _plan_for_tool(plan, tool_id)
+        result[f"{_safe_job_name(request.job.job.name)}_{tool_id}.nc"] = post.render(tool_plan)
+    return result
+
+
+def _tools_used_in_plan(plan: ToolpathPlan) -> list[str]:
+    result: list[str] = []
+    seen: set[str] = set()
+    for toolpath_pass in plan.passes:
+        if not toolpath_pass.tool or toolpath_pass.tool in seen:
+            continue
+        seen.add(toolpath_pass.tool)
+        result.append(toolpath_pass.tool)
+    return result
+
+
+def _plan_for_tool(plan: ToolpathPlan, tool_id: str) -> ToolpathPlan:
+    passes = [toolpath_pass for toolpath_pass in plan.passes if toolpath_pass.tool == tool_id]
+    if passes:
+        last = passes[-1]
+        moves = [*last.moves]
+        if not any(getattr(move, "type", None) == "program_end" for move in moves):
+            moves.extend([{"type": "spindle", "state": "off"}, {"type": "program_end"}])
+            data = last.model_dump(mode="json", exclude_none=True)
+            data["moves"] = moves
+            passes[-1] = type(last).model_validate(data)
+    return ToolpathPlan(
+        units=plan.units,
+        coordinate_system=plan.coordinate_system,
+        commands=plan.commands,
+        source_paths=plan.source_paths,
+        passes=passes,
+        warnings=plan.warnings,
+    )
+
+
+def _safe_job_name(name: str) -> str:
+    safe = "".join(ch if ch.isalnum() or ch in {"-", "_"} else "_" for ch in name.strip())
+    return safe.strip("_") or "job"

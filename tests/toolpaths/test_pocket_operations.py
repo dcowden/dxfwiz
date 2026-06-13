@@ -59,6 +59,22 @@ def test_offset_pocket_generates_nested_offset_loops():
     PREVIEWS.append(("test_offset_pocket_generates_nested_offset_loops", source_path, passes))
 
 
+def test_adaptive_pocket_generates_ordered_closed_offset_loops():
+    source_path = l_shape_source_path("p-adaptive")
+    tool = make_test_tool(diameter=0.25, depth_per_pass=0.25)
+    operation = make_pocket_operation(strategy="adaptive", stepover_percent=40)
+
+    passes = pocket_operation_to_toolpaths(operation, source_path, tool, safe_z=0.5)
+
+    assert passes[0].kind == "pocket_clear"
+    assert passes[0].offset_distance == pytest.approx(0.125)
+    assert not passes[0].warnings
+    rough_segments = _xy_segments_at_z(passes[0], -0.25)
+    assert len(rough_segments) > 20
+    assert not _has_adjacent_reverse_segments(rough_segments)
+    PREVIEWS.append(("test_adaptive_pocket_generates_ordered_closed_offset_loops", source_path, passes))
+
+
 def test_pocket_ramp_entry_changes_xy_and_z():
     source_path = rectangle_source_path("p3", width=3, height=2)
     tool = make_test_tool(diameter=0.25, depth_per_pass=0.125)
@@ -114,6 +130,24 @@ def test_l_shaped_offset_pocket_handles_disconnected_fill_segments():
     assert not passes[0].warnings
     assert len(_xy_line_moves(passes[0])) > 20
     PREVIEWS.append(("test_l_shaped_offset_pocket_handles_disconnected_fill_segments", source_path, passes))
+
+
+def test_offset_triangle_pocket_does_not_backtrack_outer_loop_at_same_depth():
+    source_path = triangle_source_path("p-triangle")
+    tool = make_test_tool(diameter=0.1875, depth_per_pass=0.094)
+    operation = make_pocket_operation(
+        strategy="offset",
+        stepover_percent=40,
+        roughing={"depth_per_pass": 0.094, "side_allowance": 0.004, "bottom_allowance": 0.004},
+        finishing={"enabled": True, "side": True, "bottom": True, "passes": 1, "milling_direction": "climb"},
+    )
+
+    passes = pocket_operation_to_toolpaths(operation, source_path, tool, safe_z=0.5)
+
+    rough_segments = _xy_segments_at_z(passes[0], -0.094)
+    assert len(rough_segments) > 6
+    assert not _has_adjacent_reverse_segments(rough_segments)
+    PREVIEWS.append(("test_offset_triangle_pocket_does_not_backtrack_outer_loop_at_same_depth", source_path, passes))
 
 
 def test_pocket_warns_when_tool_is_too_large():
@@ -227,6 +261,15 @@ def l_shape_source_path(entity: str) -> SourcePath:
     return path_from_points(entity, points)
 
 
+def triangle_source_path(entity: str) -> SourcePath:
+    points = [
+        Point2D(x=0, y=0),
+        Point2D(x=1.0, y=0),
+        Point2D(x=0.5, y=0.866),
+    ]
+    return path_from_points(entity, points)
+
+
 def path_from_points(entity: str, points: list[Point2D]) -> SourcePath:
     return SourcePath(
         id=f"path-{entity}",
@@ -237,6 +280,43 @@ def path_from_points(entity: str, points: list[Point2D]) -> SourcePath:
             for start, end in zip(points, [*points[1:], points[0]], strict=True)
         ],
     )
+
+
+def _xy_segments_at_z(toolpath_pass, z_value: float):
+    segments = []
+    current_x = None
+    current_y = None
+    current_z = None
+    for move in toolpath_pass.moves:
+        if move.type == "rapid":
+            current_x = move.x if move.x is not None else current_x
+            current_y = move.y if move.y is not None else current_y
+            current_z = move.z if move.z is not None else current_z
+            continue
+        if move.type not in {"line", "arc"}:
+            continue
+        start = (current_x, current_y, current_z)
+        current_x = move.x if move.x is not None else current_x
+        current_y = move.y if move.y is not None else current_y
+        current_z = move.z if move.z is not None else current_z
+        end = (current_x, current_y, current_z)
+        if (
+            None not in start
+            and None not in end
+            and start[2] == pytest.approx(z_value)
+            and end[2] == pytest.approx(z_value)
+            and (start[0], start[1]) != pytest.approx((end[0], end[1]))
+        ):
+            segments.append((_round_xy(start), _round_xy(end)))
+    return segments
+
+
+def _has_adjacent_reverse_segments(segments) -> bool:
+    return any(first == (second[1], second[0]) for first, second in zip(segments, segments[1:], strict=False))
+
+
+def _round_xy(point):
+    return (round(float(point[0]), 4), round(float(point[1]), 4))
 
 
 def make_test_tool(diameter: float, depth_per_pass: float) -> Tool:

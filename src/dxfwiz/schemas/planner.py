@@ -80,6 +80,15 @@ class SimulationDefaults(StrictModel):
     z_spacing: float | None = Field(default=None, gt=0)
     max_grid_cells: int = Field(default=20_000_000, gt=0)
     preview: bool = True
+    arc_chord_fraction: float = Field(default=0.5, gt=0, le=2)
+
+
+class OperationSettings(StrictModel):
+    drill_max_diameter: float = Field(default=0.21, gt=0)
+    helical_pocket_max_diameter: float = Field(default=2.0, gt=0)
+    helical_drill_max_diameter: float | None = Field(default=None, gt=0)
+    pocket_stepover_percent: float = Field(default=40.0, gt=0, le=100)
+    prefer_arcs: bool = True
 
 
 class Defaults(StrictModel):
@@ -94,7 +103,9 @@ class Defaults(StrictModel):
     finishing_allowance: float = Field(ge=0)
     cut_deeper_than_stock: float = Field(default=0.0, ge=0)
     screw_spacing: float | None = Field(default=None, gt=0)
+    ideal_screw_distance: float | None = Field(default=None, gt=0)
     min_screw_distance: float | None = Field(default=None, gt=0)
+    operation_settings: OperationSettings = Field(default_factory=OperationSettings)
     arc_detection: ArcDetectionSettings = Field(default_factory=ArcDetectionSettings)
     fixups: Fixups = Field(default_factory=Fixups)
     simulation: SimulationDefaults = Field(default_factory=SimulationDefaults)

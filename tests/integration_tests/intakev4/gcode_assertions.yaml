@@ -5,4 +5,6 @@ errors:
   max_severity: 0
 warnings:
   max_severity: 2
-
+gcode:
+  min_substring_counts:
+    - {text: "G3 ", count: 10}

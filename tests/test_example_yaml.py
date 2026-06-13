@@ -52,7 +52,7 @@ def test_example_planner_uses_machine_holding_options():
     machine = MachineFile.model_validate(load_yaml_file(EXAMPLES / "machine.yaml"))
     planner = PlannerFile.model_validate(load_yaml_file(EXAMPLES / "planner.yaml"))
 
-    assert set(planner.defaults.workholding) <= set(machine.machine.workholding)
+    assert set(planner.defaults.workholding) <= set(machine.machine.workholding.method_names)
     assert set(planner.defaults.part_holding) <= set(machine.machine.part_holding)
 
 
@@ -68,7 +68,7 @@ def test_example_planner_replaces_auto_rules_with_geometry_advice():
     planner = PlannerFile.model_validate(load_yaml_file(EXAMPLES / "planner.yaml"))
 
     assert any("prefer a drill operation" in item for item in planner.operation_advice.geometry)
-    assert any("prefer a helical_drill operation" in item for item in planner.operation_advice.geometry)
+    assert any("helical_pocket" in item for item in planner.operation_advice.geometry)
 
 
 def test_operation_inputs_are_fixed_required_checklist():

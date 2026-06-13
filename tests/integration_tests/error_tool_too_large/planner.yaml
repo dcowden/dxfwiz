@@ -21,7 +21,12 @@ defaults:
   milling_direction: climb
   finishing_allowance: 0.01
   cut_deeper_than_stock: 0.01
-  min_screw_distance: 1.1
+  ideal_screw_distance: 12.0
+  operation_settings:
+    drill_max_diameter: 0.1
+    helical_pocket_max_diameter: 2.0
+    pocket_stepover_percent: 40.0
+    prefer_arcs: true
   arc_detection:
     mode: FOR_PLANNING
     tolerance: 0.002

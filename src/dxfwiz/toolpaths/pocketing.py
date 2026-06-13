@@ -7,7 +7,7 @@ from shapely.geometry import GeometryCollection, LineString, MultiLineString, Mu
 from dxfwiz.schemas.job import PocketOperation
 from dxfwiz.schemas.machine import Tool
 from dxfwiz.toolpaths.model import SourcePath, ToolpathPass
-from dxfwiz.toolpaths.operations import _contour_feed_moves, _depth_passes, source_path_points
+from dxfwiz.toolpaths.operations import _contour_feed_moves, _depth_passes, _orient_cut_points, _polyline_feed_moves, source_path_points
 
 
 @dataclass(frozen=True)
@@ -99,7 +99,12 @@ def _clearing_pass(
     warnings = _area_warnings(operation, area, offset_distance)
     moves: list[dict] = []
     if not warnings:
-        fill_paths = _fill_paths(area, operation.strategy, tool.diameter * operation.stepover_percent / 100)
+        fill_paths = _fill_paths(
+            area,
+            operation.strategy,
+            tool.diameter * operation.stepover_percent / 100,
+            operation.roughing.milling_direction,
+        )
         for depth in depths:
             z = -depth
             moves.extend(
@@ -144,7 +149,7 @@ def _wall_finish_pass(
     warnings = _area_warnings(operation, area, offset_distance)
     moves: list[dict] = []
     if not warnings:
-        for path in _area_exteriors(area):
+        for path in _area_exteriors(area, operation.finishing.milling_direction):
             moves.extend(_closed_path_moves(path, z_bottom, safe_z, feed))
     return ToolpathPass(
         id=f"{operation.id}-wall-finish",
@@ -187,20 +192,40 @@ def _area_warnings(operation: PocketOperation, area, offset_distance: float) -> 
     return []
 
 
-def _fill_paths(area, strategy: str, stepover: float) -> list[_PocketPath]:
+def _fill_paths(area, strategy: str, stepover: float, milling_direction: str | None) -> list[_PocketPath]:
+    if strategy == "adaptive":
+        return _adaptive_fill_paths(area, stepover, milling_direction)
     if strategy == "offset":
-        return _offset_fill_paths(area, stepover)
+        return _offset_fill_paths(area, stepover, milling_direction)
     return _raster_fill_paths(area, stepover)
 
 
-def _offset_fill_paths(area, stepover: float) -> list[_PocketPath]:
+def _adaptive_fill_paths(area, stepover: float, milling_direction: str | None) -> list[_PocketPath]:
+    """Concentric, loop-preserving clearing inspired by Kiri:Moto area pockets.
+
+    This is not full HSM trochoidal clearing. It keeps each offset ring as a
+    closed path and orders rings from the inside outward, which avoids the
+    stitched pseudo-spiral backtracking that can make occasional pockets slow.
+    """
+    paths: list[_PocketPath] = []
+    for loop in reversed(_offset_loops(area, stepover, milling_direction)):
+        paths.append(_PocketPath(loop, closed=True))
+    return _order_closed_paths(paths)
+
+
+def _offset_fill_paths(area, stepover: float, milling_direction: str | None) -> list[_PocketPath]:
+    loops = _offset_loops(area, stepover, milling_direction)
+    spiral = _spiral_from_loops(list(reversed(loops)))
+    return [_PocketPath(spiral, closed=False)] if len(spiral) >= 2 else []
+
+
+def _offset_loops(area, stepover: float, milling_direction: str | None) -> list[list[tuple[float, float]]]:
     loops: list[list[tuple[float, float]]] = []
     current = area
     while not current.is_empty and current.area > 1e-12:
-        loops.extend(_area_exteriors(current))
+        loops.extend(_area_exteriors(current, milling_direction))
         current = current.buffer(-stepover, join_style="round")
-    spiral = _spiral_from_loops(list(reversed(loops)))
-    return [_PocketPath(spiral, closed=False)] if len(spiral) >= 2 else []
+    return loops
 
 
 def _raster_fill_paths(area, stepover: float) -> list[_PocketPath]:
@@ -248,12 +273,12 @@ def _spiral_from_loops(loops: list[list[tuple[float, float]]]) -> list[tuple[flo
     return points
 
 
-def _area_exteriors(area) -> list[list[tuple[float, float]]]:
+def _area_exteriors(area, milling_direction: str | None = None) -> list[list[tuple[float, float]]]:
     paths: list[list[tuple[float, float]]] = []
     for polygon in _polygons(area):
         coords = [(float(x), float(y)) for x, y in polygon.exterior.coords[:-1]]
         if len(coords) >= 2:
-            paths.append(coords)
+            paths.append(_orient_cut_points(coords, "inside", milling_direction))
     return paths
 
 
@@ -328,9 +353,10 @@ def _enter_path_moves(
         moves.append({"type": "line", "x": first_cut[0], "y": first_cut[1], "z": z_bottom, "feed": feed})
         remaining = points[2:]
         if pocket_path.closed:
-            remaining = [*remaining, points[0]]
-        moves.extend({"type": "line", "x": x, "y": y, "z": z_bottom, "feed": feed} for x, y in remaining)
-        if not pocket_path.closed:
+            moves.extend(_polyline_feed_moves([points[1], *remaining, points[0]], z_bottom, feed, closed=False))
+        else:
+            moves.extend(_polyline_feed_moves([points[1], *remaining], z_bottom, feed, closed=False))
+        if not pocket_path.closed and len(points) == 2:
             moves.extend(
                 {"type": "line", "x": x, "y": y, "z": z_bottom, "feed": feed}
                 for x, y in reversed(points[:-1])
@@ -353,12 +379,21 @@ def _cut_path_moves(
     feed: float,
     include_first: bool,
 ) -> list[dict]:
-    points = pocket_path.points if include_first else pocket_path.points[1:]
-    moves = [{"type": "line", "x": x, "y": y, "z": z_bottom, "feed": feed} for x, y in points]
-    if pocket_path.closed and pocket_path.points:
+    if pocket_path.closed:
         start = pocket_path.points[0]
-        moves.append({"type": "line", "x": start[0], "y": start[1], "z": z_bottom, "feed": feed})
-    return moves
+        if include_first:
+            return [
+                {"type": "line", "x": start[0], "y": start[1], "z": z_bottom, "feed": feed},
+                *_polyline_feed_moves(pocket_path.points, z_bottom, feed, closed=True),
+            ]
+        return _polyline_feed_moves([*pocket_path.points, start], z_bottom, feed, closed=False)
+    if include_first:
+        start = pocket_path.points[0]
+        return [
+            {"type": "line", "x": start[0], "y": start[1], "z": z_bottom, "feed": feed},
+            *_polyline_feed_moves(pocket_path.points, z_bottom, feed, closed=False),
+        ]
+    return _polyline_feed_moves(pocket_path.points, z_bottom, feed, closed=False)
 
 
 def _orient_path(pocket_path: _PocketPath, current: tuple[float, float] | None) -> _PocketPath:
@@ -374,6 +409,27 @@ def _orient_path(pocket_path: _PocketPath, current: tuple[float, float] | None) 
     if _distance_sq(current, points[-1]) < _distance_sq(current, points[0]):
         return _PocketPath(list(reversed(points)), closed=False)
     return pocket_path
+
+
+def _order_closed_paths(paths: list[_PocketPath]) -> list[_PocketPath]:
+    ordered: list[_PocketPath] = []
+    remaining = paths[:]
+    current: tuple[float, float] | None = None
+    while remaining:
+        if current is None:
+            index = 0
+        else:
+            index = min(
+                range(len(remaining)),
+                key=lambda candidate_index: min(
+                    _distance_sq(current, point) for point in remaining[candidate_index].points
+                ),
+            )
+        pocket_path = remaining.pop(index)
+        pocket_path = _orient_path(pocket_path, current)
+        ordered.append(pocket_path)
+        current = pocket_path.points[0] if pocket_path.points else current
+    return ordered
 
 
 def _can_cut_link(area, start: tuple[float, float], end: tuple[float, float]) -> bool:

@@ -4,6 +4,23 @@ dxfwiz is a browser-based workflow for turning messy 2D DXF/SVG files into CNC-r
 
 The initial target is 2.5D CNC routers, especially FRC-style workflows where the CAD student, CAM planner, and machine operator may be different people. The current focus is DXF cleanup, geometry recognition, visualization, and preparation for AI-assisted operation planning.
 
+## Collaboration Model
+
+dxfwiz is not designed around the assumption that one person owns the whole job from design through cutting. In FRC and many real shops, "the operator" is often a myth: the part designer, CAM planner, machine operator, mentor/reviewer, and person responsible for workholding may be different people with different knowledge and preferences.
+
+The job is the shared object that passes between roles. Files in the bundle should make those handoffs explicit:
+
+- designers should be able to mark geometry intent, part criticality, keepouts, and features that need special treatment
+- CAM/planning users should be able to express machining preferences, strategy, tool choices, and acceptable tradeoffs
+- machine operators should be able to express physical machine reality, setup defaults, available tools, workholding preferences, and manual-intervention limits
+- reviewers should be able to inspect `geom.yaml`, `op.yaml`, toolpaths, warnings, and generated gcode without needing the original GUI state
+
+This means YAML files are not just machine inputs; they are collaboration artifacts. They should remain human-readable, diffable, and role-friendly. A novice should not need to understand every advanced policy to complete a simple job, but the system should have clear places for each role to record its preferences when needed.
+
+Role onboarding is part of the product. When a user first sets up as a designer, machine operator, CAM planner, or reviewer, the app should collect only the preferences relevant to that role. Those preferences can later contribute to a job without forcing every user to become an expert in every domain.
+
+The long-term web app should support live collaboration: when one person changes geometry intent, operation inputs, tool policy, warnings, or plan review status, other collaborators should be able to see that change in the same job context.
+
 ## Current Flow
 
 1. User uploads a DXF.
@@ -55,7 +72,7 @@ This should eventually include all dialect details needed to emit valid gcode. F
 
 Planner guidance file. This replaces the earlier `job_template.yaml` name.
 
-Contains operator/planner preferences that are not physical machine facts:
+Contains operator/planner/CAM preferences that are not physical machine facts:
 
 - defaults such as stock thickness, z-zero preference, coordinate system, and planner-level `max_tools`
 - English `operation_advice` blocks:
@@ -63,13 +80,25 @@ Contains operator/planner preferences that are not physical machine facts:
   - `tools`
   - `geometry`
 
+Over time, planner preferences should be able to come from role-specific defaults, job-specific overrides, and direct user instructions. The planner should merge those into a clear job-level intent instead of requiring every user to edit a fully detailed expert policy.
+
 Do not use structured `auto_rules`; put guidance in English advice. Example geometry advice:
 
 - for holes between 0.04 in and 0.2 in, prefer drill operations
-- for holes between 0.2 in and 0.6 in, prefer helical drill operations
+- for holes above drill size, use `helical_contour` only when the remaining center plug is smaller than the machine `maximum_plug_size`; otherwise use `helical_pocket` up to the configured maximum circular-pocket diameter
+- `operation_settings.prefer_arcs` controls controller compatibility: when true, circular/helical operations should emit arc moves where possible; when false, line-segment approximations are acceptable for compatibility-focused posts/controllers
 - if a strict rectangular frame encloses the parts, treat it as stock/frame
 
 Planner `max_tools` means the number of tools the user is willing to use for the job. This differs from machine `max_tools`: if the machine has `max_tools: 1` but planner says `max_tools: 2`, the user is willing to tolerate one manual tool change.
+
+Tool-change policy should be presented in user-centered terms first, then mapped to structured settings. Useful examples:
+
+- "least attention": prefer one tool and avoid surprise manual interventions
+- "fastest runtime": allow tool changes when they materially reduce cutting time
+- "one planned change after fixtures": allow a predictable tool change after fixture/screw operations, but avoid random mid-job changes
+- "one tool only": force a single selected or best-fit tool unless the job is impossible
+
+For manual/single-spindle machines, separate gcode files per tool should be treated as a first-class output mode, not merely a workaround. Many router users prefer this because it makes the manual tool-change moment explicit and inspectable.
 
 ### `operation_inputs.yaml`
 
@@ -134,7 +163,8 @@ Open paths are eligible for future operations. The operation name for following 
 The eventual operation file contains machining operations such as:
 
 - drill
-- helical drill
+- helical contour
+- helical pocket
 - pocket
 - contour
 - trace

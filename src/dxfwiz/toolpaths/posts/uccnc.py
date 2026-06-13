@@ -30,10 +30,12 @@ logger = logging.getLogger(__name__)
 class UccncPost:
     def __init__(self, precision: int = 4) -> None:
         self.precision = precision
+        self._last_motion: dict[str, str] = {}
 
     def render(self, plan: ToolpathPlan) -> str:
         command_count = len(plan.commands) + sum(len(toolpath_pass.moves) for toolpath_pass in plan.passes)
         logger.info("Rendering UCCNC G-code with %d neutral command(s)", command_count)
+        self._last_motion = {}
         lines = []
         for command in plan.commands:
             line = self._render_command(command)
@@ -86,7 +88,11 @@ class UccncPost:
         for axis in ("x", "y", "z"):
             value = getattr(command, axis, None)
             if value is not None:
-                parts.append(axis.upper() + self._format(value))
+                formatted = self._format(value)
+                key = axis.upper()
+                if self._last_motion.get(key) != formatted:
+                    parts.append(key + formatted)
+                    self._last_motion[key] = formatted
         if include_ij:
             for axis in ("i", "j"):
                 value = getattr(command, axis, None)
@@ -94,7 +100,12 @@ class UccncPost:
                     parts.append(axis.upper() + self._format(value))
         feed = getattr(command, "feed", None)
         if feed is not None:
-            parts.append("F" + self._format(feed))
+            formatted = self._format(feed)
+            if self._last_motion.get("F") != formatted:
+                parts.append("F" + formatted)
+                self._last_motion["F"] = formatted
+        if len(parts) == 1:
+            return ""
         return " ".join(parts)
 
     def _format(self, value: float) -> str:

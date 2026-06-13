@@ -54,7 +54,7 @@ ISSUES: dict[str, IssueDefinition] = {
         code="W2004",
         level="warning",
         title="Interior slug remains",
-        description="A helical drill operation may leave a large interior slug.",
+        description="A helical contour operation may leave a large interior slug.",
     ),
     "W2005": IssueDefinition(
         code="W2005",
@@ -91,6 +91,12 @@ ISSUES: dict[str, IssueDefinition] = {
         level="warning",
         title="AI planner fell back to local planner",
         description="The AI planner failed and the deterministic local planner was used instead.",
+    ),
+    "W2011": IssueDefinition(
+        code="W2011",
+        level="warning",
+        title="Excessive recutting",
+        description="A material-removal simulation found dexels cut more than twice.",
     ),
     "W3001": IssueDefinition(
         code="W3001",
@@ -163,7 +169,7 @@ def classify_toolpath_warning(message: str) -> str:
         return "E3001"
     if "skipped roughing pass" in lowered:
         return "W2008"
-    if "helical drilling leaves an interior slug" in lowered:
+    if "helical contour leaves an interior slug" in lowered or "helical drilling leaves an interior slug" in lowered:
         return "W2004"
     if "pocket offset" in lowered and "leaves no machinable area" in lowered:
         return "W2007"

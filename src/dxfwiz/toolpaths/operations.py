@@ -5,7 +5,7 @@ from html import escape
 from statistics import median
 from pathlib import Path
 
-from shapely.geometry import LineString, Point, Polygon, box
+from shapely.geometry import LineString, MultiLineString, Point, Polygon, box
 
 from dxfwiz.schemas.common import Point2D
 from dxfwiz.schemas.job import ContourOperation
@@ -39,6 +39,7 @@ def contour_operation_to_toolpaths(
     if operation.roughing.enabled:
         rough_offset = _offset_distance(operation.offset, tool.diameter, operation.roughing.side_allowance)
         rough_points = offset_source_path(source_path, operation.offset, rough_offset)
+        rough_points = _orient_cut_points(rough_points, operation.offset, operation.roughing.milling_direction)
         depths = _depth_passes(operation.depth, operation.roughing.depth_per_pass, tool.depth_per_pass)
         depths = _add_extra_depth_to_final_pass(depths, operation.extra_depth, tool.depth_per_pass)
         if not rough_points:
@@ -107,6 +108,7 @@ def contour_operation_to_toolpaths(
     if operation.finishing.enabled and operation.finishing.side:
         finish_offset = _offset_distance(operation.offset, tool.diameter, 0.0)
         finish_points = offset_source_path(source_path, operation.offset, finish_offset)
+        finish_points = _orient_cut_points(finish_points, operation.offset, operation.finishing.milling_direction)
         for index in range(1, operation.finishing.passes + 1):
             z_bottom = -total_depth
             if not finish_points:
@@ -164,6 +166,29 @@ def offset_source_path(
     return [(float(x), float(y)) for x, y in offset.exterior.coords[:-1]]
 
 
+def _orient_cut_points(
+    points: list[tuple[float, float]],
+    offset_side: str,
+    milling_direction: str | None,
+) -> list[tuple[float, float]]:
+    if offset_side == "on" or len(points) < 3 or milling_direction not in {"climb", "conventional"}:
+        return points
+    desired_ccw = offset_side == "inside"
+    if milling_direction == "conventional":
+        desired_ccw = not desired_ccw
+    current_ccw = _signed_area(points) > 0
+    return points if current_ccw == desired_ccw else list(reversed(points))
+
+
+def _signed_area(points: list[tuple[float, float]]) -> float:
+    if len(points) < 3:
+        return 0.0
+    return 0.5 * sum(
+        first[0] * second[1] - second[0] * first[1]
+        for first, second in zip(points, [*points[1:], points[0]], strict=False)
+    )
+
+
 def source_path_points(source_path: SourcePath, arc_segments: int = 48) -> list[tuple[float, float]]:
     points: list[tuple[float, float]] = []
     for segment in source_path.segments:
@@ -185,24 +210,148 @@ def offset_distance_statistics(
 ) -> dict[str, float]:
     source_points = source_path_points(source_path)
     source_line = LineString([*source_points, source_points[0]])
-    cut_points: list[tuple[float, float]] = [
-        (x, y)
-        for _kind, points in _toolpath_render_segments(toolpath_pass)
-        for x, y, _z in points
-    ]
-    sample_points = []
-    for first, second in zip(cut_points, cut_points[1:], strict=False):
-        for fraction in (0.2, 0.4, 0.6, 0.8):
-            sample_points.append(
-                (
-                    first[0] + (second[0] - first[0]) * fraction,
-                    first[1] + (second[1] - first[1]) * fraction,
-                )
-            )
+    sample_points = _cutting_sample_points(toolpath_pass)
     distances = [source_line.distance(Point(point)) for point in sample_points]
     if not distances:
         return {"min": 0.0, "max": 0.0, "median": 0.0}
     return {"min": min(distances), "max": max(distances), "median": median(distances)}
+
+
+def contour_offset_validation(
+    source_path: SourcePath,
+    toolpath_pass: ToolpathPass,
+    sample_spacing: float = 0.02,
+) -> dict[str, float]:
+    """Compare a contour pass against the vector offset it is supposed to follow."""
+    if toolpath_pass.offset_side is None or toolpath_pass.offset_distance is None:
+        return {}
+    expected_lines = _expected_offset_lines(source_path, toolpath_pass)
+    if not expected_lines:
+        return {}
+    expected_line = MultiLineString(expected_lines) if len(expected_lines) > 1 else expected_lines[0]
+    actual_segments = _cutting_lines(toolpath_pass)
+    if not actual_segments:
+        return {}
+    actual_line = MultiLineString(actual_segments) if len(actual_segments) > 1 else actual_segments[0]
+    actual_samples = _sample_lines(actual_segments, sample_spacing)
+    expected_samples = _sample_lines(expected_lines, sample_spacing)
+    actual_to_expected = [expected_line.distance(Point(point)) for point in actual_samples]
+    expected_to_actual = [actual_line.distance(Point(point)) for point in expected_samples]
+    if not actual_to_expected or not expected_to_actual:
+        return {}
+    return {
+        "actual_to_expected_min": min(actual_to_expected),
+        "actual_to_expected_median": median(actual_to_expected),
+        "actual_to_expected_max": max(actual_to_expected),
+        "expected_to_actual_min": min(expected_to_actual),
+        "expected_to_actual_median": median(expected_to_actual),
+        "expected_to_actual_max": max(expected_to_actual),
+        "actual_sample_count": len(actual_to_expected),
+        "expected_sample_count": len(expected_to_actual),
+    }
+
+
+def contour_offset_error_samples(
+    source_path: SourcePath,
+    toolpath_pass: ToolpathPass,
+    sample_spacing: float = 0.02,
+) -> list[dict[str, float | str]]:
+    if toolpath_pass.offset_side is None or toolpath_pass.offset_distance is None:
+        return []
+    expected_lines = _expected_offset_lines(source_path, toolpath_pass)
+    if not expected_lines:
+        return []
+    expected_line = MultiLineString(expected_lines) if len(expected_lines) > 1 else expected_lines[0]
+    samples = _sample_lines(_cutting_lines(toolpath_pass), sample_spacing)
+    return [
+        {
+            "pass_id": toolpath_pass.id,
+            "operation_id": toolpath_pass.operation_id,
+            "entity": toolpath_pass.entity or "",
+            "kind": toolpath_pass.kind,
+            "x": point[0],
+            "y": point[1],
+            "error": expected_line.distance(Point(point)),
+        }
+        for point in samples
+    ]
+
+
+def _expected_offset_lines(source_path: SourcePath, toolpath_pass: ToolpathPass) -> list[LineString]:
+    if toolpath_pass.offset_side is None or toolpath_pass.offset_distance is None:
+        return []
+    distance = toolpath_pass.offset_distance
+    if toolpath_pass.offset_side == "on" or abs(distance) <= 1e-12:
+        points = source_path_points(source_path)
+        return [LineString([*points, points[0]])] if source_path.closed and len(points) > 1 else []
+    source_points = source_path_points(source_path)
+    ccw = _signed_area(source_points) > 0
+    offset_side = _path_offset_side(toolpath_pass.offset_side, ccw)
+    lines = []
+    for segment in source_path.segments:
+        if isinstance(segment, SourceLineSegment):
+            line = _offset_line_segment(segment, distance, offset_side)
+        elif isinstance(segment, SourceArcSegment):
+            line = _offset_arc_segment(segment, distance, offset_side)
+        else:
+            line = None
+        if line is not None and line.length > 1e-9:
+            lines.append(line)
+    raw_points = offset_source_path(source_path, toolpath_pass.offset_side, toolpath_pass.offset_distance)
+    if len(raw_points) > 1:
+        lines.append(LineString([*raw_points, raw_points[0]]))
+    return lines
+
+
+def _path_offset_side(offset_side: str, source_ccw: bool) -> str:
+    if offset_side == "outside":
+        return "right" if source_ccw else "left"
+    return "left" if source_ccw else "right"
+
+
+def _offset_line_segment(segment: SourceLineSegment, distance: float, side: str) -> LineString | None:
+    start = _xy(segment.start)
+    end = _xy(segment.end)
+    dx = end[0] - start[0]
+    dy = end[1] - start[1]
+    length = math.hypot(dx, dy)
+    if length <= 1e-12:
+        return None
+    left = (-dy / length, dx / length)
+    normal = left if side == "left" else (-left[0], -left[1])
+    return LineString(
+        [
+            (start[0] + normal[0] * distance, start[1] + normal[1] * distance),
+            (end[0] + normal[0] * distance, end[1] + normal[1] * distance),
+        ]
+    )
+
+
+def _offset_arc_segment(segment: SourceArcSegment, distance: float, side: str) -> LineString | None:
+    center = _xy(segment.center)
+    start = _xy(segment.start)
+    end = _xy(segment.end)
+    center_side = "left" if segment.direction == "ccw" else "right"
+    radius = segment.radius - distance if side == center_side else segment.radius + distance
+    if radius <= 1e-9:
+        return None
+    start_angle = math.atan2(start[1] - center[1], start[0] - center[0])
+    end_angle = math.atan2(end[1] - center[1], end[0] - center[0])
+    sweep = end_angle - start_angle
+    if segment.direction == "ccw" and sweep <= 0:
+        sweep += 2 * math.pi
+    if segment.direction == "cw" and sweep >= 0:
+        sweep -= 2 * math.pi
+    steps = max(8, math.ceil(abs(sweep) * radius / 0.005))
+    return LineString(
+        [
+            (
+                center[0] + math.cos(start_angle + sweep * index / steps) * radius,
+                center[1] + math.sin(start_angle + sweep * index / steps) * radius,
+            )
+            for index in range(steps + 1)
+        ]
+    )
 
 
 def assert_mostly_offset(
@@ -217,6 +366,51 @@ def assert_mostly_offset(
             f"Median offset distance {stats['median']:.6f} is not within {tolerance} "
             f"of expected {expected_distance:.6f}. Stats: {stats}"
         )
+
+
+def _cutting_sample_points(toolpath_pass: ToolpathPass) -> list[tuple[float, float]]:
+    sample_points = []
+    for line in _cutting_lines(toolpath_pass):
+        coords = list(line.coords)
+        for first, second in zip(coords, coords[1:], strict=False):
+            for fraction in (0.2, 0.4, 0.6, 0.8):
+                sample_points.append(
+                    (
+                        first[0] + (second[0] - first[0]) * fraction,
+                        first[1] + (second[1] - first[1]) * fraction,
+                    )
+                )
+    return sample_points
+
+
+def _cutting_lines(toolpath_pass: ToolpathPass) -> list[LineString]:
+    lines = []
+    for kind, points in _toolpath_render_segments(toolpath_pass):
+        if kind == "rapid":
+            continue
+        xy_points = [(x, y) for x, y, _z in points]
+        for first, second in zip(xy_points, xy_points[1:], strict=False):
+            if math.hypot(second[0] - first[0], second[1] - first[1]) <= 1e-9:
+                continue
+            lines.append(LineString([first, second]))
+    return lines
+
+
+def _sample_lines(lines: list[LineString], spacing: float) -> list[tuple[float, float]]:
+    samples = []
+    for line in lines:
+        samples.extend(_sample_line(line, spacing))
+    return samples
+
+
+def _sample_line(line: LineString, spacing: float) -> list[tuple[float, float]]:
+    if line.length <= 1e-9:
+        return []
+    steps = max(1, math.ceil(line.length / max(spacing, 1e-9)))
+    return [
+        (float(point.x), float(point.y))
+        for point in (line.interpolate(line.length * index / steps) for index in range(steps + 1))
+    ]
 
 
 def _unmachinable_contour_pass(
@@ -282,7 +476,8 @@ def render_toolpath_preview_sheet_svg(
         "pocket_floor_finish": "#f59e0b",
         "pocket_wall_finish": "#dc2626",
         "peck_drill": "#0f766e",
-        "helical_drill": "#7c3aed",
+        "helical_contour": "#7c3aed",
+        "helical_pocket": "#9333ea",
         "move": "#64748b",
     }
     lines = [
@@ -513,7 +708,7 @@ def _arc_move_points(
     start: tuple[float, float, float],
     move: ArcMove,
     z: float,
-    segments: int = 18,
+    chord_length: float = 0.005,
 ) -> list[tuple[float, float, float]]:
     center_x = start[0] + move.i
     center_y = start[1] + move.j
@@ -524,8 +719,8 @@ def _arc_move_points(
         sweep += 2 * math.pi
     if move.direction == "cw" and sweep >= 0:
         sweep -= 2 * math.pi
-    steps = max(3, math.ceil(abs(sweep) / (math.pi / 18)))
     radius = math.hypot(start[0] - center_x, start[1] - center_y)
+    steps = max(18, math.ceil(abs(sweep) * radius / max(chord_length, 1e-9)))
     return [
         (
             center_x + math.cos(start_angle + sweep * index / steps) * radius,
@@ -645,14 +840,16 @@ def _spiral_line_moves(
     current_depth = 0.0
     for target_depth in depths:
         loop_segments = len(closed_points) - 1
+        ramp_points = [(start[0], start[1], -current_depth)]
         for index, (x, y) in enumerate(closed_points[1:], start=1):
             fraction = index / loop_segments
             depth = current_depth + (target_depth - current_depth) * fraction
-            moves.append({"type": "line", "x": x, "y": y, "z": -depth, "feed": feed})
+            ramp_points.append((x, y, -depth))
+        moves.extend(_ramped_polyline_feed_moves(ramp_points, feed))
         current_depth = target_depth
     if bottom_cleanup:
         z_bottom = -depths[-1]
-        moves.extend({"type": "line", "x": x, "y": y, "z": z_bottom, "feed": feed} for x, y in closed_points[1:])
+        moves.extend(_polyline_feed_moves(closed_points, z_bottom, feed, closed=False))
     return moves
 
 
@@ -661,11 +858,20 @@ def _contour_feed_moves(
     z_bottom: float,
     feed: float,
 ) -> list[dict]:
+    return _polyline_feed_moves(points, z_bottom, feed, closed=True)
+
+
+def _polyline_feed_moves(
+    points: list[tuple[float, float]],
+    z_bottom: float,
+    feed: float,
+    closed: bool = False,
+) -> list[dict]:
     if len(points) < 2:
         return []
     return [
         _segment_to_move(segment, z_bottom, feed)
-        for segment in _recover_arc_segments(points)
+        for segment in _recover_arc_segments(points, closed=closed)
     ]
 
 
@@ -756,10 +962,8 @@ def _moves_along_line(
     feed: float,
 ) -> list[dict]:
     stations = _stations_between(line, start_distance, end_distance)
-    return [
-        {"type": "line", "x": point[0], "y": point[1], "z": z, "feed": feed}
-        for point in (_point_at(line, station) for station in stations[1:])
-    ]
+    points = [_point_at(line, station) for station in stations]
+    return _polyline_feed_moves(points, z, feed, closed=False)
 
 
 def _ramp_back_moves(
@@ -780,7 +984,10 @@ def _ramp_back_moves(
         z = start_z + (end_z - start_z) * fraction
         point = _point_at(line, station)
         moves.append({"type": "line", "x": point[0], "y": point[1], "z": z, "feed": feed})
-    return moves
+    if len(moves) < 3:
+        return moves
+    start_point = _point_at(line, start_distance)
+    return _ramped_polyline_feed_moves([(start_point[0], start_point[1], start_z), *[(move["x"], move["y"], move["z"]) for move in moves]], feed)
 
 
 def _stations_between(line: LineString, start_distance: float, end_distance: float) -> list[float]:
@@ -912,12 +1119,41 @@ def _segment_to_move(segment: dict, z_bottom: float, feed: float) -> dict:
     return {"type": "line", "x": segment["end"][0], "y": segment["end"][1], "z": z_bottom, "feed": feed}
 
 
+def _ramped_polyline_feed_moves(points: list[tuple[float, float, float]], feed: float) -> list[dict]:
+    if len(points) < 2:
+        return []
+    xy_points = [(x, y) for x, y, _z in points]
+    moves = []
+    for segment in _recover_arc_segments(xy_points, closed=False):
+        end_index = segment["end_index"]
+        end_z = points[end_index][2]
+        if segment["type"] == "arc":
+            start = segment["start"]
+            center = segment["center"]
+            moves.append(
+                {
+                    "type": "arc",
+                    "direction": segment["direction"],
+                    "x": segment["end"][0],
+                    "y": segment["end"][1],
+                    "z": end_z,
+                    "i": center[0] - start[0],
+                    "j": center[1] - start[1],
+                    "feed": feed,
+                }
+            )
+        else:
+            moves.append({"type": "line", "x": segment["end"][0], "y": segment["end"][1], "z": end_z, "feed": feed})
+    return moves
+
+
 def _recover_arc_segments(
     points: list[tuple[float, float]],
     tolerance: float = 1e-4,
-    min_points: int = 5,
+    min_points: int = 6,
+    closed: bool = True,
 ) -> list[dict]:
-    closed_points = [*points, points[0]]
+    closed_points = [*points, points[0]] if closed else points
     segments: list[dict] = []
     index = 0
     while index < len(closed_points) - 1:
@@ -926,7 +1162,15 @@ def _recover_arc_segments(
             segments.append(arc)
             index = arc["end_index"]
             continue
-        segments.append({"type": "line", "start": closed_points[index], "end": closed_points[index + 1]})
+        segments.append(
+            {
+                "type": "line",
+                "start": closed_points[index],
+                "end": closed_points[index + 1],
+                "start_index": index,
+                "end_index": index + 1,
+            }
+        )
         index += 1
     return segments
 
@@ -950,6 +1194,7 @@ def _detect_arc_at(
             "type": "arc",
             "start": points[start_index],
             "end": points[end_index],
+            "start_index": start_index,
             "end_index": end_index,
         }
     return best
@@ -968,9 +1213,10 @@ def _fit_arc(points: list[tuple[float, float]], tolerance: float) -> dict | None
     errors = [abs(math.hypot(point[0] - center[0], point[1] - center[1]) - radius) for point in points]
     if max(errors) > tolerance * 2 or sum(errors) / len(errors) > tolerance:
         return None
-    direction = _arc_direction(points, center)
-    if direction is None:
+    signed_sweep = _arc_signed_sweep(points, center)
+    if signed_sweep is None or abs(signed_sweep) > math.pi + 1e-9:
         return None
+    direction = "ccw" if signed_sweep > 0 else "cw"
     return {"center": center, "radius": radius, "direction": direction}
 
 
@@ -999,6 +1245,13 @@ def _circle_center(
 
 
 def _arc_direction(points: list[tuple[float, float]], center: tuple[float, float]) -> str | None:
+    signed = _arc_signed_sweep(points, center)
+    if signed is None:
+        return None
+    return "ccw" if signed > 0 else "cw"
+
+
+def _arc_signed_sweep(points: list[tuple[float, float]], center: tuple[float, float]) -> float | None:
     signed = 0.0
     previous_angle = math.atan2(points[0][1] - center[1], points[0][0] - center[0])
     for point in points[1:]:
@@ -1012,7 +1265,7 @@ def _arc_direction(points: list[tuple[float, float]], center: tuple[float, float
         previous_angle = angle
     if abs(signed) <= 1e-9:
         return None
-    return "ccw" if signed > 0 else "cw"
+    return signed
 
 
 def _depth_passes(depth: float, step: float, hard_step: float | None = None) -> list[float]:

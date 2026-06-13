@@ -184,7 +184,8 @@ class ToolpathPass(StrictModel):
         "pocket_floor_finish",
         "pocket_wall_finish",
         "peck_drill",
-        "helical_drill",
+        "helical_contour",
+        "helical_pocket",
         "trace",
         "move",
     ]

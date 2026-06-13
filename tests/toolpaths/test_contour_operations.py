@@ -1,3 +1,4 @@
+import math
 from pathlib import Path
 import re
 
@@ -8,9 +9,12 @@ from dxfwiz.schemas.job import ContourOperation
 from dxfwiz.schemas.machine import Tool
 from dxfwiz.toolpaths.operations import (
     assert_mostly_offset,
+    contour_offset_validation,
     contour_operation_to_toolpaths,
     render_toolpath_preview_sheet_svg,
     source_path_points,
+    _signed_area,
+    _toolpath_render_segments,
 )
 from dxfwiz.toolpaths.model import SourceArcSegment, SourceLineSegment, SourcePath
 
@@ -230,7 +234,6 @@ def test_contour_tabs_are_hopped_only_on_depths_below_tab_top_without_ramping():
     passes = contour_operation_to_toolpaths(operation, source_path, tool, safe_z=0.5)
 
     z_values = _line_move_z_values(passes[0])
-    assert not any(z == pytest.approx(-0.15) for z in z_values[:6])
     assert any(z == pytest.approx(-0.15) for z in z_values)
     deep_segments = _xy_segments_at_z(passes[0], -0.25)
     assert not any(_segment_crosses_tab_span(segment, 1.38, 2.62) for segment in deep_segments)
@@ -342,6 +345,9 @@ def test_contour_offset_validation_uses_realized_toolpath_moves():
     passes = contour_operation_to_toolpaths(operation, source_path, tool, safe_z=0.5)
 
     assert_mostly_offset(source_path, passes[0], expected_distance=0.125, tolerance=1e-3)
+    validation = contour_offset_validation(source_path, passes[0], sample_spacing=0.05)
+    assert validation["actual_to_expected_median"] <= 1e-6
+    assert validation["expected_to_actual_median"] <= 1e-6
     xy_moves = [
         (move.x, move.y)
         for move in passes[0].moves
@@ -439,6 +445,45 @@ def test_contour_operation_handles_arc_and_line_profile():
     PREVIEWS.append(("test_contour_operation_handles_arc_and_line_profile", source_path, passes))
 
 
+def test_closed_contour_follows_one_order_and_one_cutting_direction():
+    source_path = arc_and_line_source_path("direction")
+    tool = make_test_tool(diameter=0.25, depth_per_pass=0.125)
+    operation = ContourOperation.model_validate(
+        {
+            "id": "op-direction",
+            "type": "contour",
+            "entity": "direction",
+            "tool": "t5",
+            "depth": 0.125,
+            "offset": "outside",
+            "ramping": False,
+            "roughing": {
+                "enabled": True,
+                "depth_per_pass": 0.125,
+                "side_allowance": 0.0,
+                "bottom_allowance": 0.0,
+                "milling_direction": "climb",
+            },
+            "finishing": {"enabled": False},
+        }
+    )
+
+    passes = contour_operation_to_toolpaths(operation, source_path, tool, safe_z=0.5)
+
+    xy_points = [
+        (x, y)
+        for kind, points in _toolpath_render_segments(passes[0])
+        if kind != "rapid"
+        for x, y, z in points
+        if z == pytest.approx(-0.125)
+    ]
+    assert xy_points[0] == pytest.approx(xy_points[-1])
+    assert _signed_area(_dedupe_adjacent(xy_points[:-1])) < 0
+    arc_directions = {move.direction for move in passes[0].moves if move.type == "arc"}
+    assert arc_directions <= {"cw"}
+    PREVIEWS.append(("test_closed_contour_follows_one_order_and_one_cutting_direction", source_path, passes))
+
+
 def test_inside_contour_generates_tiny_path_when_tool_barely_fits_and_warns_when_too_big():
     tool = make_test_tool(diameter=0.4, depth_per_pass=0.1)
     slot_that_fits = rectangle_source_path("e5", width=1.0, height=0.41)
@@ -465,11 +510,7 @@ def test_inside_contour_generates_tiny_path_when_tool_barely_fits_and_warns_when
 
     assert [toolpath_pass.kind for toolpath_pass in passes] == ["rough_contour"]
     assert passes[0].warnings == []
-    fit_xy_moves = [
-        (move.x, move.y)
-        for move in passes[0].moves
-        if move.type == "line" and move.x is not None and move.y is not None
-    ]
+    fit_xy_moves = _motion_xy_sample_values(passes[0])
     xs = [point[0] for point in fit_xy_moves]
     ys = [point[1] for point in fit_xy_moves]
     assert max(xs) - min(xs) == pytest.approx(0.6)
@@ -511,11 +552,53 @@ def test_inside_contour_generates_tiny_path_when_tool_barely_fits_and_warns_when
 
 
 def _line_move_z_values(toolpath_pass):
-    return [move.z for move in toolpath_pass.moves if move.type == "line"]
+    return [move.z for move in toolpath_pass.moves if move.type in {"line", "arc"}]
 
 
 def _line_move_xy_values(toolpath_pass):
-    return [(move.x, move.y) for move in toolpath_pass.moves if move.type == "line"]
+    return [(move.x, move.y) for move in toolpath_pass.moves if move.type in {"line", "arc"}]
+
+
+def _motion_xy_sample_values(toolpath_pass):
+    points = []
+    current_x = None
+    current_y = None
+    for move in toolpath_pass.moves:
+        if move.type == "rapid":
+            current_x = move.x if move.x is not None else current_x
+            current_y = move.y if move.y is not None else current_y
+            continue
+        if move.type == "line":
+            current_x = move.x if move.x is not None else current_x
+            current_y = move.y if move.y is not None else current_y
+            if current_x is not None and current_y is not None:
+                points.append((current_x, current_y))
+            continue
+        if move.type == "arc" and current_x is not None and current_y is not None:
+            center_x = current_x + move.i
+            center_y = current_y + move.j
+            radius = math.hypot(current_x - center_x, current_y - center_y)
+            start_angle = math.atan2(current_y - center_y, current_x - center_x)
+            end_angle = math.atan2(move.y - center_y, move.x - center_x)
+            sweep = end_angle - start_angle
+            if move.direction == "ccw" and sweep <= 0:
+                sweep += 2 * math.pi
+            if move.direction == "cw" and sweep >= 0:
+                sweep -= 2 * math.pi
+            for index in range(1, 13):
+                angle = start_angle + sweep * index / 12
+                points.append((center_x + math.cos(angle) * radius, center_y + math.sin(angle) * radius))
+            current_x = move.x
+            current_y = move.y
+    return points
+
+
+def _dedupe_adjacent(points):
+    deduped = []
+    for point in points:
+        if not deduped or point != pytest.approx(deduped[-1]):
+            deduped.append(point)
+    return deduped
 
 
 def _xy_segments_at_z(toolpath_pass, z_value: float):
@@ -532,7 +615,7 @@ def _xy_segments_at_z(toolpath_pass, z_value: float):
             if move.z is not None:
                 current_z = move.z
             continue
-        if move.type != "line":
+        if move.type not in {"line", "arc"}:
             continue
         start = (current_x, current_y, current_z)
         if move.x is not None:

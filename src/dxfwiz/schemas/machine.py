@@ -1,8 +1,8 @@
 from typing import Literal
 
-from pydantic import Field
+from pydantic import Field, model_validator
 
-from dxfwiz.schemas.common import AxisRange, StrictModel, Units
+from dxfwiz.schemas.common import AxisRange, Point2D, StrictModel, Units
 
 
 WorkholdingOption = Literal["clamps", "screws", "tape", "vacuum"]
@@ -28,16 +28,55 @@ class Spindle(StrictModel):
     min_rpm: int | None = None
 
 
+class BasicWorkholdingMethod(StrictModel):
+    method: Literal["clamps", "tape", "vacuum"]
+
+
+class ScrewWorkholdingMethod(StrictModel):
+    method: Literal["screws"]
+    screw_hole_diameter: float = Field(default=0.125, gt=0)
+    screw_grid: float | None = Field(default=None, gt=0)
+    screw_grid_offset: Point2D = Field(default_factory=lambda: Point2D(x=0.0, y=0.0))
+    screw_clearance: float | None = Field(default=None, ge=0)
+    allow_oversized_holes_to_prevent_toolchange: bool = True
+
+
+WorkholdingMethod = BasicWorkholdingMethod | ScrewWorkholdingMethod
+
+
+class WorkholdingConfig(StrictModel):
+    supported_methods: list[WorkholdingMethod]
+
+    @model_validator(mode="before")
+    @classmethod
+    def coerce_legacy_list(cls, data):
+        if isinstance(data, list):
+            return {
+                "supported_methods": [
+                    {"method": item} if isinstance(item, str) else item
+                    for item in data
+                ]
+            }
+        return data
+
+    @property
+    def method_names(self) -> list[WorkholdingOption]:
+        return [method.method for method in self.supported_methods]
+
+
 class Machine(StrictModel):
     name: str
     type: Literal["router", "laser", "plasma"]
     axes: int = Field(ge=2, le=3)
     max_tools: int = Field(ge=1)
+    separate_nc_file_per_tool: bool = False
     clear_z: float
     screw_grid: float | None = Field(default=None, gt=0)
+    screw_grid_offset: Point2D = Field(default_factory=lambda: Point2D(x=0.0, y=0.0))
     screw_clearance: float | None = Field(default=None, ge=0)
+    maximum_plug_size: float = Field(default=0.25, gt=0)
     operation_sort: list[OperationSortPriority] = Field(default_factory=lambda: ["tool", "group", "nest_order"])
-    workholding: list[WorkholdingOption]
+    workholding: WorkholdingConfig
     part_holding: list[PartHoldingOption]
     work_envelope: WorkEnvelope
     coordinate_system: CoordinateSystem

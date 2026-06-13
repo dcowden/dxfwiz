@@ -16,8 +16,9 @@ def render_dexel_preview_png(
     state_view: bool = True,
     state_mode: str = "binary",
     overlay_expected: bool = False,
+    include_isometric: bool = False,
 ) -> bytes:
-    """Render top and isometric views to PNG bytes.
+    """Render a material-state preview to PNG bytes.
 
     The simulation service can return arrays/metrics without knowing anything about files;
     tests or UI callers can persist these bytes wherever they want.
@@ -52,10 +53,10 @@ def render_dexel_preview_png(
     stride = max(1, int(max(depth_values.shape) / max_surface_points))
     surface_z = grid.stock.thickness - depth_values
 
-    fig = plt.figure(figsize=(12, 5), dpi=140)
+    fig = plt.figure(figsize=(7, 6), dpi=140) if not include_isometric else plt.figure(figsize=(12, 5), dpi=140)
     fig.suptitle(title, fontsize=13, fontweight="bold")
 
-    top_ax = fig.add_subplot(1, 2, 1)
+    top_ax = fig.add_subplot(1, 1, 1) if not include_isometric else fig.add_subplot(1, 2, 1)
     image = top_ax.imshow(
         display_values,
         extent=(grid.bounds.min_x, grid.bounds.max_x, grid.bounds.min_y, grid.bounds.max_y),
@@ -88,27 +89,28 @@ def render_dexel_preview_png(
             colorbar.set_ticks([0, 1, 2, 3, 4])
             colorbar.set_ticklabels(["stock", "removed", "partial", "overcut", "cut"])
 
-    iso_ax = fig.add_subplot(1, 2, 2, projection="3d")
-    sampled_x = x_grid[::stride, ::stride]
-    sampled_y = y_grid[::stride, ::stride]
-    sampled_z = surface_z[::stride, ::stride]
-    sampled_depth = depth_values[::stride, ::stride]
-    iso_ax.plot_surface(
-        sampled_x,
-        sampled_y,
-        sampled_z,
-        facecolors=_surface_colors(plt, sampled_depth, expected_values[::stride, ::stride], grid, state_view, state_mode),
-        linewidth=0,
-        antialiased=False,
-        shade=False,
-        alpha=0.95,
-    )
-    iso_ax.set_title("Isometric stock view")
-    iso_ax.set_xlabel("X")
-    iso_ax.set_ylabel("Y")
-    iso_ax.set_zlabel("remaining Z")
-    iso_ax.view_init(elev=30, azim=-45)
-    _set_equal_3d(iso_ax, grid, sampled_z)
+    if include_isometric:
+        iso_ax = fig.add_subplot(1, 2, 2, projection="3d")
+        sampled_x = x_grid[::stride, ::stride]
+        sampled_y = y_grid[::stride, ::stride]
+        sampled_z = surface_z[::stride, ::stride]
+        sampled_depth = depth_values[::stride, ::stride]
+        iso_ax.plot_surface(
+            sampled_x,
+            sampled_y,
+            sampled_z,
+            facecolors=_surface_colors(plt, sampled_depth, expected_values[::stride, ::stride], grid, state_view, state_mode),
+            linewidth=0,
+            antialiased=False,
+            shade=False,
+            alpha=0.95,
+        )
+        iso_ax.set_title("Isometric stock view")
+        iso_ax.set_xlabel("X")
+        iso_ax.set_ylabel("Y")
+        iso_ax.set_zlabel("remaining Z")
+        iso_ax.view_init(elev=30, azim=-45)
+        _set_equal_3d(iso_ax, grid, sampled_z)
 
     fig.tight_layout()
     buffer = BytesIO()

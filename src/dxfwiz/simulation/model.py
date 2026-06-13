@@ -5,7 +5,7 @@ from typing import Annotated, Literal
 from pydantic import Field
 
 from dxfwiz.schemas import MachineFile
-from dxfwiz.schemas.common import StrictModel
+from dxfwiz.schemas.common import Point2D, StrictModel
 from dxfwiz.schemas.job import JobFile
 from dxfwiz.toolpaths.model import ToolpathPlan
 
@@ -53,8 +53,29 @@ class ExpectedRectangleRemoval(StrictModel):
     depth: float = Field(gt=0)
 
 
+class ExpectedPolygonRemoval(StrictModel):
+    type: Literal["polygon"]
+    operation_id: str | None = None
+    entity: str | None = None
+    points: list[Point2D] = Field(min_length=3)
+    depth: float = Field(gt=0)
+
+
+class ExpectedSweptLineRemoval(StrictModel):
+    type: Literal["swept_line"]
+    operation_id: str | None = None
+    entity: str | None = None
+    start_x: float
+    start_y: float
+    end_x: float
+    end_y: float
+    start_depth: float = Field(ge=0)
+    end_depth: float = Field(ge=0)
+    radius: float = Field(gt=0)
+
+
 ExpectedRemoval = Annotated[
-    ExpectedCircleRemoval | ExpectedRectangleRemoval,
+    ExpectedCircleRemoval | ExpectedRectangleRemoval | ExpectedPolygonRemoval | ExpectedSweptLineRemoval,
     Field(discriminator="type"),
 ]
 
@@ -89,6 +110,7 @@ class SimulationMetrics(StrictModel):
     rapid_collision_count: int
     unsafe_rapid_count: int
     max_cut_count: int
+    excessive_recut_cells: int = 0
     max_actual_depth: float
     max_expected_depth: float
 

@@ -5,5 +5,5 @@ max_rapid_collisions: 0
 max_unsafe_rapids: 0
 max_overcut_cells: 1000000
 max_undercut_cells: 1000000
-max_air_cut_moves: 1000
+max_air_cut_moves: 2500
 max_recut_cells: 1000000

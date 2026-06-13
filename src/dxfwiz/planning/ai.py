@@ -159,7 +159,7 @@ def _planner_prompt(request: PlanningRequest) -> str:
             "- Do not create separate finish operations. Configure roughing and finishing inside the same operation.",
             "- If USER_PLANNING_INPUTS_YAML.finishing_allowance is greater than zero, every outside contour for a part entity needs one contour operation with roughing.side_allowance set to that value and finishing.enabled true.",
             "- Put outside contour operations in operation group contours.",
-            "- Contour tabs belong only on contour operations, not pockets, drills, or helical drills.",
+            "- Contour tabs belong only on contour operations, not pockets, drills, helical contours, or helical pockets.",
             "",
             "GEOM_YAML:",
             _dump_yaml(request.geometry.model_dump(mode="json", exclude_none=True)),

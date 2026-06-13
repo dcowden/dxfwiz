@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 import numpy as np
+from shapely import contains_xy
+from shapely.geometry import Polygon
 
 from dxfwiz.simulation.model import (
     SimulationBounds,
@@ -74,6 +76,7 @@ class DexelGrid:
         return self._operation_ids[operation_id]
 
     def expected_circle(self, center: tuple[float, float], radius: float, depth: float) -> None:
+        depth = self._expected_depth(depth)
         yy, xx = self._window_mesh(center[0] - radius, center[1] - radius, center[0] + radius, center[1] + radius)
         if xx.size == 0:
             return
@@ -83,11 +86,66 @@ class DexelGrid:
         np.maximum(target, depth, out=target, where=mask)
 
     def expected_rectangle(self, min_x: float, min_y: float, max_x: float, max_y: float, depth: float) -> None:
+        depth = self._expected_depth(depth)
         x_slice, y_slice = self._window_slices(min_x, min_y, max_x, max_y)
         if _empty_slice(x_slice) or _empty_slice(y_slice):
             return
         target = self.expected_depth[y_slice, x_slice]
         np.maximum(target, depth, out=target)
+
+    def expected_polygon(self, points: list[tuple[float, float]], depth: float) -> None:
+        depth = self._expected_depth(depth)
+        polygon = Polygon(points)
+        if not polygon.is_valid:
+            polygon = polygon.buffer(0)
+        if polygon.is_empty:
+            return
+        polygon = polygon.buffer(self.xy_spacing * 0.5)
+        min_x, min_y, max_x, max_y = polygon.bounds
+        yy, xx = self._window_mesh(min_x, min_y, max_x, max_y)
+        if xx.size == 0:
+            return
+        x_slice, y_slice = self._window_slices(min_x, min_y, max_x, max_y)
+        mask = contains_xy(polygon, xx, yy)
+        target = self.expected_depth[y_slice, x_slice]
+        np.maximum(target, depth, out=target, where=mask)
+
+    def expected_swept_line(
+        self,
+        start: tuple[float, float],
+        end: tuple[float, float],
+        start_depth: float,
+        end_depth: float,
+        radius: float,
+    ) -> None:
+        min_x = min(start[0], end[0]) - radius
+        max_x = max(start[0], end[0]) + radius
+        min_y = min(start[1], end[1]) - radius
+        max_y = max(start[1], end[1]) + radius
+        yy, xx = self._window_mesh(min_x, min_y, max_x, max_y)
+        if xx.size == 0:
+            return
+        x_slice, y_slice = self._window_slices(min_x, min_y, max_x, max_y)
+        dx = end[0] - start[0]
+        dy = end[1] - start[1]
+        length_sq = dx * dx + dy * dy
+        if length_sq <= 1e-12:
+            radial_sq = (xx - start[0]) ** 2 + (yy - start[1]) ** 2
+            mask = radial_sq <= radius**2
+            depth = np.full_like(xx, max(start_depth, end_depth), dtype=np.float32)
+        else:
+            t = ((xx - start[0]) * dx + (yy - start[1]) * dy) / length_sq
+            t = np.clip(t, 0.0, 1.0)
+            nearest_x = start[0] + t * dx
+            nearest_y = start[1] + t * dy
+            radial_sq = (xx - nearest_x) ** 2 + (yy - nearest_y) ** 2
+            mask = radial_sq <= radius**2
+            depth = (start_depth + t * (end_depth - start_depth)).astype(np.float32)
+        target = self.expected_depth[y_slice, x_slice]
+        np.maximum(target, np.minimum(depth, self.stock.thickness), out=target, where=mask)
+
+    def _expected_depth(self, depth: float) -> float:
+        return min(float(depth), float(self.stock.thickness))
 
     def remove_circle(
         self,

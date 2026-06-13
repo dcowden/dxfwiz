@@ -21,7 +21,12 @@ defaults:
   milling_direction: conventional   # climb | conventional
   finishing_allowance: 0.01
   cut_deeper_than_stock: 0.01
-  min_screw_distance: 1.1
+  ideal_screw_distance: 12.0
+  operation_settings:
+    drill_max_diameter: 0.21
+    helical_pocket_max_diameter: 2.0
+    pocket_stepover_percent: 40.0
+    prefer_arcs: true
   arc_detection:
     mode: FOR_PLANNING
     tolerance: 0.002
@@ -70,8 +75,8 @@ operation_advice:
     - "A strict four-sided rectangle containing parts is a stock frame, not a part."
     - "Mark top level, four-sided rectangles NOT containing parts as ignored entities"
     - "If no stock frame exists, ask the user for stock size before planning."
-    - "For holes between 0.04 inches and 0.2 inches in diameter, prefer a drill operation."
-    - "For holes between 0.2 inches and 0.6 inches in diameter, prefer a helical_drill operation."
+    - "For holes up to 0.21 inches in diameter, prefer a drill operation."
+    - "For circular cutouts above drill size, use helical_contour only when the remaining plug is smaller than the machine maximum_plug_size; otherwise use helical_pocket up to about 2.0 inches in diameter."
   strategies:
     - "all inside holes should be full depth unless specified otherwise."
     - "for pockets, use 40% stepover"

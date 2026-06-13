@@ -832,7 +832,7 @@ def _render_operation_input_cards(context: dict[str, Any], state: dict[str, Any]
         if not workholding_missing:
             workholding_note.style("display: none")
         workholding = ui.select(
-            list(machine.machine.workholding),
+            machine.machine.workholding.method_names,
             value=inputs.get("workholding_method") or [],
             label="Workholding",
             multiple=True,
@@ -940,7 +940,9 @@ def _planning_request(
                 "finishing_allowance": planner.defaults.finishing_allowance,
                 "cut_deeper_than_stock": planner.defaults.cut_deeper_than_stock,
                 "screw_spacing": planner.defaults.screw_spacing,
+                "ideal_screw_distance": planner.defaults.ideal_screw_distance,
                 "min_screw_distance": planner.defaults.min_screw_distance,
+                "operation_settings": planner.defaults.operation_settings.model_dump(mode="json"),
                 "fixups": {
                     name: bool(setting["enabled"])
                     for name, setting in planner.defaults.fixups.model_dump().items()

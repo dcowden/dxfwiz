@@ -30,7 +30,7 @@ def test_screw_grid_avoids_expanded_rectangular_part_boundary():
         ),
         screw_grid=0.75,
         screw_clearance=0.3,
-        min_screw_distance=1.1,
+        ideal_screw_distance=1.5,
     )
 
     points = _screw_points(request)
@@ -38,7 +38,9 @@ def test_screw_grid_avoids_expanded_rectangular_part_boundary():
     blocked = _part_clearance_polygons(request, 0.3)
     assert points
     assert all(not blocked.covers(Point(point)) for point in points)
-    assert all(_has_neighbor(point, points, 1.1) for point in points)
+    assert (0.0, 0.0) in points
+    assert min(Point(point).distance(Point((6.0, 4.0))) for point in points) <= request.machine.machine.screw_grid
+    assert _minimum_nonzero_distance(points) >= 0.75
     _render_preview("rectangular part clearance", request, points)
 
 
@@ -57,42 +59,64 @@ def test_screw_grid_uses_part_polygon_instead_of_part_bounding_box():
         ),
         screw_grid=0.5,
         screw_clearance=0.1,
-        min_screw_distance=0.75,
-        screw_spacing=1.0,
+        ideal_screw_distance=1.0,
         fixed_dxf=fixed_dxf,
     )
 
     points = _screw_points(request)
 
-    assert (3.0, 3.0) in points
+    assert any(x > 2.0 and y > 1.75 for x, y in points)
     blocked = _part_clearance_polygons(request, 0.1)
     assert all(not blocked.covers(Point(point)) for point in points)
     _render_preview("L-shaped part polygon clearance", request, points)
 
 
-def test_screw_grid_discards_points_without_nearby_screw():
+def test_screw_grid_uses_ideal_spacing_instead_of_neighbor_pairs():
     request = _request(
         geometry=_geometry(
-            stock=(0, 0, 2, 2),
-            entities=[_entity("frame", "rectangle", (0, 0, 2, 2))],
+            stock=(0, 0, 4, 2),
+            entities=[_entity("frame", "rectangle", (0, 0, 4, 2))],
             entity_map=[{"entity": "frame", "role": "frame"}],
         ),
         screw_grid=1.0,
         screw_clearance=0.0,
-        min_screw_distance=0.75,
+        ideal_screw_distance=2.0,
     )
 
     points = _screw_points(request)
 
-    assert points == []
-    _render_preview("near-neighbor filter", request, points)
+    assert {(0.0, 0.0), (0.0, 2.0), (4.0, 0.0), (4.0, 2.0), (2.0, 1.0)} <= set(points)
+    assert all(float(x).is_integer() and float(y).is_integer() for x, y in points)
+    _render_preview("ideal spacing grid", request, points)
+
+
+def test_screw_grid_offset_keeps_candidates_on_physical_grid():
+    request = _request(
+        geometry=_geometry(
+            stock=(0, 0, 3, 2),
+            entities=[_entity("frame", "rectangle", (0, 0, 3, 2))],
+            entity_map=[{"entity": "frame", "role": "frame"}],
+        ),
+        screw_grid=1.0,
+        screw_grid_offset=(0.25, 0.5),
+        screw_clearance=0.0,
+        ideal_screw_distance=2.0,
+    )
+
+    points = _screw_points(request)
+
+    assert points
+    assert all(abs(((x - 0.25) / 1.0) - round((x - 0.25) / 1.0)) <= 1e-6 for x, _ in points)
+    assert all(abs(((y - 0.5) / 1.0) - round((y - 0.5) / 1.0)) <= 1e-6 for _, y in points)
+    _render_preview("offset physical screw grid", request, points)
 
 
 def _request(
     geometry: GeometryFile,
     screw_grid: float,
     screw_clearance: float,
-    min_screw_distance: float,
+    ideal_screw_distance: float,
+    screw_grid_offset: tuple[float, float] = (0.0, 0.0),
     screw_spacing: float | None = None,
     fixed_dxf: str | None = None,
 ) -> PlanningRequest:
@@ -107,6 +131,7 @@ def _request(
                 "max_tools": 1,
                 "clear_z": 0.25,
                 "screw_grid": screw_grid,
+                "screw_grid_offset": {"x": screw_grid_offset[0], "y": screw_grid_offset[1]},
                 "screw_clearance": screw_clearance,
                 "workholding": ["screws"],
                 "part_holding": ["tabs"],
@@ -145,7 +170,7 @@ def _request(
                 "z_zero_position": "stock_top",
                 "coordinate_system": "G54",
                 "workholding_method": ["screws"],
-                "min_screw_distance": min_screw_distance,
+                "ideal_screw_distance": ideal_screw_distance,
                 "screw_spacing": screw_spacing,
             },
         }
@@ -201,8 +226,14 @@ def _l_shape_dxf() -> tuple[str, str]:
     return stream.getvalue(), entity.dxf.handle
 
 
-def _has_neighbor(point, points, distance: float) -> bool:
-    return any(point != other and Point(point).distance(Point(other)) <= distance + 1e-9 for other in points)
+def _minimum_nonzero_distance(points) -> float:
+    distances = [
+        Point(first).distance(Point(second))
+        for index, first in enumerate(points)
+        for second in points[index + 1 :]
+        if first != second
+    ]
+    return min(distances)
 
 
 def _render_preview(title: str, request: PlanningRequest, points: list[tuple[float, float]]) -> None:

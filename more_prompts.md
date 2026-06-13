@@ -393,3 +393,44 @@ before you implement, look at kiriwhat cool tricks do they use that we should us
 
 (3) tool selection.
 given a job, we need to select the best tool. the operator might give us the tool, but ideally we want to have a good idea of what to pick.  The scenario i want to support is the one for single-tool machines: assume you need to do the whole job with one tool, and choose the LARGEST single tool that can do the job. Then, accept that screw holes will use this tool.  For me, that typically means a 3/16" tool is selected, because we have a lot of 0.201 inch diameter holes.  If there are any features that need a 1/8" tool, i use a 1/8" tool. Anyway, this is tricky because we need to evaluate all of the model geometry to figure out what the minimum radius needed is. we should code this as  'tool selector'. You can make non-graphical test caess for this.
+
+>>>>>>>>>>>>>>>>>>>>>>
+
+first, i noted in the ccode that we have the below gcode. change the post process
+ro avoid re-issuing x, y, z, or F that are the same as the prior command, those just waste space.  
+
+G1 X31.565 Y37.979 Z-0.26 F70
+G1 X31.569 Y37.981 Z-0.26 F70
+G1 X32.147 Y38.265 Z-0.26 F70
+G1 X32.151 Y38.267 Z-0.26 F70
+G1 X32.741 Y38.523 Z-0.26 F70
+G1 X32.746 Y38.525 Z-0.26 F70
+G1 X33.348 Y38.753 Z-0.26 F70
+G1 X33.352 Y38.754 Z-0.26 F70
+G1 X33.965 Y38.953 Z-0.26 F70
+G1 X33.969 Y38.954 Z-0.26 F70
+G1 X34.591 Y39.123 Z-0.26 F70
+G1 X34.596 Y39.124 Z-0.26 F70
+G1 X35.227 Y39.264 Z-0.26 F70
+G1 X35.231 Y39.265 Z-0.26 F70
+G1 X35.869 Y39.374 Z-0.26 F70
+G1 X35.874 Y39.375 Z-0.26 F70
+G1 X36.518 Y39.453 Z-0.26 F70
+G1 X36.523 Y39.454 Z-0.26 F70
+G1 X37.172 Y39.501 Z-0.26 F70
+G1 X37.177 Y39.501 Z-0.26 F70
+G1 X37.831 Y39.517 Z-0.26 F70
+
+
+also, change the simulation to now include all move types.
+i like the 2d heatmaps. we dont need the isometric view when its just a single picture.  isometric view is useful if we refelect a 3d view of the stock
+
+speaking of the simulation, it showed me that there are two screw holes at each location, not one.  why are there pairs of holes? 
+
+i watched the simulation for 2xintake on ncviewer. i noticed that the gcode for the triangular cutouts appear to have two problmes.  first, the initial rough passes cut eac level twice, and second, the tool paths change directions for the arcs vs the lines.  the path at each level should be one continuous path, not two, each containing different directions. the only situation where switching directions makes sense is with tabs and ramping on-- in that case only, you have to backtrack.
+
+but this is good new, because its a failure mode we can use the simulation to detect.  for the simulation, we should track the number of times a dexel is cut.  twice is ok and common, for stepover. but this example would yield 4x or more, so i think our simulation would detect this problem.  Fix the simulation to track number of times an area is cut, and warn when it is bigger than 2.  then, use that to detect the failure above in 2xintake.. then re-run the test.   
+
+you sould also add tests to make sure that when we travel a closed loop, we do it with the same direction the entire time. the current code generates paths that jump around.
+
+

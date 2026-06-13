@@ -6,7 +6,7 @@ operation_advice:
     - "Use operation_groups with these exact names when present: fixtures, internal_pockets, internal_holes, and contours."
     - "For through cuts, depth should be stock thickness plus cut_deeper_than_stock."
     - "Each operation must reference exactly one entity. Multiple holes or multiple contours must be represented as multiple operations."
-    - "Do not create separate finishing operations. Finishing is configured inside the same contour, pocket, or helical_drill operation."
+    - "Do not create separate finishing operations. Finishing is configured inside the same contour, pocket, helical_contour, or helical_pocket operation."
     - "When finishing_allowance is greater than zero, every outside part contour operation should set roughing.side_allowance to that value and finishing.enabled to true."
   workholding:
     - "For screw workholding, place screw holes in scrap areas when a stock frame and part geometry are present."
@@ -38,9 +38,9 @@ operation_advice:
     - "Frames and ignored entities are not parts and should not receive machining operations."
     - "Open paths may receive trace operations when the user explicitly asks to follow them."
     - "Closed part boundaries normally receive contour operations with outside offset."
-    - "Closed cutouts normally receive inside contour, pocket, drill, or helical_drill operations depending on size and shape."
+    - "Closed cutouts normally receive inside contour, pocket, drill, helical_contour, or helical_pocket operations depending on size and shape."
     - "Circle cutouts smaller than or close to tool diameter should be drilled only when a suitable tool is available."
-    - "Circle cutouts larger than the selected tool should usually use helical_drill or pocket operations."
+    - "Circle cutouts larger than the selected tool should use helical_contour when a single helical contour leaves an acceptably small plug, and helical_pocket when the plug would be too large."
     - "Non-circular internal cutouts should normally be pockets or inside contours."
   strategies:
     - "Always start by inspecting the geometry and finding the largest tool diameter that will do the job."

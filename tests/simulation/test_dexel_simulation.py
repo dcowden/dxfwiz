@@ -3,13 +3,15 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from dxfwiz.schemas import MachineFile
+from dxfwiz.schemas import GeometryFile, MachineFile
+from dxfwiz.schemas.job import JobFile
 from dxfwiz.simulation import (
     DexelGrid,
     DexelSimulationRequest,
     SimulationBounds,
     SimulationSettings,
     SimulationStock,
+    build_expected_removals,
     render_dexel_preview_png,
     simulate_toolpath,
 )
@@ -34,6 +36,111 @@ def test_dexel_grid_initializes_expected_and_actual_depth_arrays():
     assert grid.expected_depth.max() == pytest.approx(0.2)
     assert grid.operation_index("op-a") == 0
     assert grid.operation_index("op-a") == 0
+
+
+def test_expected_polygon_and_swept_line_are_counted_as_expected_removal():
+    run = simulate_toolpath(
+        _request(
+            [
+                _pass(
+                    "op-contour",
+                    [
+                        {"type": "rapid", "x": 0.25, "y": 0.25, "z": 0.25},
+                        {"type": "line", "z": -0.1, "feed": 10},
+                        {"type": "line", "x": 1.75, "y": 0.25, "z": -0.1, "feed": 40},
+                    ],
+                )
+            ],
+            expected=[
+                {
+                    "type": "polygon",
+                    "points": [{"x": 0.8, "y": 0.8}, {"x": 1.2, "y": 0.8}, {"x": 1.0, "y": 1.2}],
+                    "depth": 0.05,
+                },
+                {
+                    "type": "swept_line",
+                    "start_x": 0.25,
+                    "start_y": 0.25,
+                    "end_x": 1.75,
+                    "end_y": 0.25,
+                    "start_depth": 0.1,
+                    "end_depth": 0.1,
+                    "radius": 0.125,
+                },
+            ],
+        )
+    )
+
+    assert run.response.metrics.expected_removed_cells > 0
+    assert run.response.metrics.max_expected_depth == pytest.approx(0.1)
+
+
+def test_non_cutting_move_pass_without_tool_diameter_updates_position_without_error():
+    move_pass = ToolpathPass.model_validate(
+        {
+            "id": "op-move-pass",
+            "operation_id": "op-move",
+            "kind": "move",
+            "z_bottom": 0.25,
+            "moves": [{"type": "rapid", "x": 1.0, "y": 1.0, "z": 0.25}],
+        }
+    )
+
+    run = simulate_toolpath(_request([move_pass]))
+
+    assert run.response.errors == []
+
+
+def test_generated_screw_hole_expected_removal_uses_full_stock_depth():
+    job = JobFile.model_validate(
+        {
+            "schema_version": "1.0",
+            "units": {"length": "in", "speed": "in/min"},
+            "job": {
+                "name": "screw sim",
+                "geometry_file": "geom.yaml",
+                "machine": "machine.yaml",
+                "planner": "planner.yaml",
+                "post": "post.yaml",
+            },
+            "stock": {"material": "plywood", "thickness": 0.25, "z_zero": "stock_top", "origin_location": "bottom_left"},
+            "coordinate_system": "G55",
+            "generated_entities": [
+                {
+                    "id": "wh1",
+                    "role": "screw_hole",
+                    "shape": "circle",
+                    "center": {"x": 1.0, "y": 1.0},
+                    "diameter": 0.25,
+                }
+            ],
+            "operations": [
+                {
+                    "id": "op-screw",
+                    "type": "drill",
+                    "description": "shallow screw drill",
+                    "entity": "wh1",
+                    "tool": "t1",
+                    "depth": 0.1,
+                    "peck_depth": 0.1,
+                    "retract_amount": 0.25,
+                }
+            ],
+        }
+    )
+    expected = build_expected_removals(job, _geometry())
+    shallow_drill = _pass(
+        "op-screw",
+        [
+            {"type": "rapid", "x": 1.0, "y": 1.0, "z": 0.25},
+            {"type": "line", "z": -0.1, "feed": 10},
+        ],
+    )
+
+    run = simulate_toolpath(_request([shallow_drill], expected=expected.removals))
+
+    assert expected.removals[0]["depth"] == pytest.approx(0.25)
+    assert run.response.metrics.undercut_cells > 0
 
 
 def test_linear_feed_removes_swept_capsule_and_tracks_last_operation():
@@ -101,6 +208,26 @@ def test_rapid_collision_is_reported_along_path():
     assert run.response.metrics.unsafe_rapid_count == 1
 
 
+def test_vertical_retract_rapid_does_not_count_as_stock_collision():
+    run = simulate_toolpath(
+        _request(
+            [
+                _pass(
+                    "op-retract",
+                    [
+                        {"type": "rapid", "x": 1.0, "y": 1.0, "z": 0.25},
+                        {"type": "line", "z": -0.1, "feed": 10},
+                        {"type": "rapid", "z": 0.25},
+                    ],
+                )
+            ]
+        )
+    )
+
+    assert run.response.errors == []
+    assert run.response.metrics.rapid_collision_count == 0
+
+
 def test_overlapping_pocket_style_paths_track_recut_cells_and_air_moves():
     run = simulate_toolpath(
         _request(
@@ -127,6 +254,26 @@ def test_overlapping_pocket_style_paths_track_recut_cells_and_air_moves():
     assert run.response.metrics.recut_cells > 0
     assert run.response.metrics.max_cut_count > 1
     assert run.response.metrics.removed_cells > 0
+
+
+def test_excessive_recut_warns_when_same_area_is_cut_more_than_twice():
+    repeated_moves = [
+        {"type": "rapid", "x": 0.3, "y": 1.0, "z": 0.25},
+        {"type": "line", "z": -0.1, "feed": 10},
+    ]
+    for _ in range(3):
+        repeated_moves.extend(
+            [
+                {"type": "line", "x": 1.7, "y": 1.0, "z": -0.1, "feed": 40},
+                {"type": "line", "x": 0.3, "y": 1.0, "z": -0.1, "feed": 40},
+            ]
+        )
+
+    run = simulate_toolpath(_request([_pass("op-recut", repeated_moves)]))
+
+    assert run.response.metrics.excessive_recut_cells > 0
+    assert run.response.metrics.max_cut_count > 2
+    assert [warning.code for warning in run.response.warnings] == ["W2011"]
 
 
 def test_ball_end_profile_removes_less_at_tool_edge_than_flat_profile():
@@ -177,6 +324,26 @@ def _stock() -> SimulationStock:
     return SimulationStock(
         bounds=SimulationBounds(min_x=0, min_y=0, max_x=2, max_y=2),
         thickness=0.25,
+    )
+
+
+def _geometry() -> GeometryFile:
+    return GeometryFile.model_validate(
+        {
+            "schema_version": "1.0",
+            "units": {"length": "in", "source": "guessed", "confidence": 1.0, "coordinate_scale": 1.0},
+            "source": {"original_file": "test.dxf", "cleaned_file": "test_fixed.dxf", "format": "dxf"},
+            "summary": {
+                "entity_count": 0,
+                "closed_count": 0,
+                "open_count": 0,
+                "ignored_count": 0,
+                "generated_count": 1,
+                "bounding_box": {"min": {"x": 0, "y": 0}, "max": {"x": 2, "y": 2}},
+            },
+            "entity_map": [],
+            "entities": [],
+        }
     )
 
 
