@@ -54,7 +54,7 @@ def compile_toolpath_plan(
             warnings.append(f"{operation.id}: tool {operation.tool} is not defined in machine.yaml")
             continue
         try:
-            operation_passes = _operation_to_passes(operation, resolver, tool, safe_z)
+            operation_passes = _operation_to_passes(operation, resolver, tool, safe_z, machine.machine.toolpath_engine)
         except Exception as exc:
             logger.exception("Failed to compile operation %s", operation.id)
             warnings.append(f"{operation.id}: toolpath compilation failed: {exc}")
@@ -96,7 +96,13 @@ def compile_toolpath_plan(
     )
 
 
-def _operation_to_passes(operation: Operation, resolver: "GeometryResolver", tool, safe_z: float) -> list[ToolpathPass]:
+def _operation_to_passes(
+    operation: Operation,
+    resolver: "GeometryResolver",
+    tool,
+    safe_z: float,
+    toolpath_engine: str,
+) -> list[ToolpathPass]:
     if isinstance(operation, DrillOperation):
         center = resolver.center(operation.entity)
         if center is None:
@@ -107,21 +113,57 @@ def _operation_to_passes(operation: Operation, resolver: "GeometryResolver", too
         diameter = operation.hole_diameter or resolver.diameter(operation.entity)
         if center is None or diameter is None:
             return [_warning_pass(operation, tool, f"{operation.id}: cannot find helical contour geometry for {operation.entity}")]
+        if toolpath_engine == "cavalier":
+            from dxfwiz.toolpaths.pocketing_cavalier import helical_contour_operation_to_cavalier_toolpaths
+
+            source_path = resolver.source_path(operation.entity)
+            if source_path is not None:
+                return _cavalier_or_legacy(
+                    operation,
+                    lambda: helical_contour_operation_to_cavalier_toolpaths(operation, source_path, tool, safe_z),
+                    lambda: helical_contour_operation_to_toolpaths(operation, center, diameter, tool, safe_z),
+                )
         return helical_contour_operation_to_toolpaths(operation, center, diameter, tool, safe_z)
     if isinstance(operation, ContourOperation):
         source_path = resolver.source_path(operation.entity)
         if source_path is None:
             return [_warning_pass(operation, tool, f"{operation.id}: contour entity {operation.entity} has no usable path")]
+        if toolpath_engine == "cavalier":
+            from dxfwiz.toolpaths.pocketing_cavalier import contour_operation_to_cavalier_toolpaths
+
+            return _cavalier_or_legacy(
+                operation,
+                lambda: contour_operation_to_cavalier_toolpaths(operation, source_path, tool, safe_z),
+                lambda: contour_operation_to_toolpaths(operation, source_path, tool, safe_z),
+            )
         return contour_operation_to_toolpaths(operation, source_path, tool, safe_z)
     if isinstance(operation, PocketOperation):
         source_path = resolver.source_path(operation.entity)
         if source_path is None:
             return [_warning_pass(operation, tool, f"{operation.id}: pocket entity {operation.entity} has no usable path")]
+        if toolpath_engine == "cavalier":
+            from dxfwiz.toolpaths.pocketing_cavalier import pocket_operation_to_cavalier_toolpaths
+
+            return _cavalier_or_legacy(
+                operation,
+                lambda: pocket_operation_to_cavalier_toolpaths(operation, source_path, tool, safe_z),
+                lambda: pocket_operation_to_toolpaths(operation, source_path, tool, safe_z),
+            )
         return pocket_operation_to_toolpaths(operation, source_path, tool, safe_z)
     if isinstance(operation, HelicalPocketOperation):
         source_path = resolver.source_path(operation.entity)
         if source_path is None:
             return [_warning_pass(operation, tool, f"{operation.id}: helical pocket entity {operation.entity} has no usable path")]
+        if toolpath_engine == "cavalier":
+            from dxfwiz.toolpaths.pocketing_cavalier import helical_pocket_operation_to_cavalier_toolpaths, pocket_operation_to_cavalier_toolpaths
+
+            return _cavalier_or_legacy(
+                operation,
+                lambda: helical_pocket_operation_to_cavalier_toolpaths(operation, source_path, tool, safe_z)
+                if operation.prefer_arcs
+                else pocket_operation_to_cavalier_toolpaths(_helical_pocket_as_pocket(operation), source_path, tool, safe_z),
+                lambda: _legacy_helical_pocket_passes(operation, resolver, tool, safe_z, source_path),
+            )
         if operation.prefer_arcs:
             center = resolver.center(operation.entity)
             diameter = operation.hole_diameter or resolver.diameter(operation.entity)
@@ -130,6 +172,38 @@ def _operation_to_passes(operation: Operation, resolver: "GeometryResolver", too
             return helical_pocket_operation_to_toolpaths(operation, center, diameter, tool, safe_z)
         return pocket_operation_to_toolpaths(_helical_pocket_as_pocket(operation), source_path, tool, safe_z)
     return [_warning_pass(operation, tool, f"{operation.id}: operation type {operation.type} is not implemented")]
+
+
+def _cavalier_or_legacy(operation: Operation, cavalier_builder, legacy_builder) -> list[ToolpathPass]:
+    try:
+        return cavalier_builder()
+    except Exception as exc:
+        logger.exception("Cavalier toolpath generation failed for operation %s; falling back to legacy", operation.id)
+        passes = legacy_builder()
+        warning = f"{operation.id}: Cavalier toolpath generation failed; used legacy engine fallback: {exc}"
+        return [_copy_pass_with_warning(toolpath_pass, warning) for toolpath_pass in passes]
+
+
+def _copy_pass_with_warning(toolpath_pass: ToolpathPass, warning: str) -> ToolpathPass:
+    data = toolpath_pass.model_dump()
+    data["warnings"] = [*toolpath_pass.warnings, warning]
+    return ToolpathPass.model_validate(data)
+
+
+def _legacy_helical_pocket_passes(
+    operation: HelicalPocketOperation,
+    resolver: "GeometryResolver",
+    tool,
+    safe_z: float,
+    source_path: SourcePath,
+) -> list[ToolpathPass]:
+    if operation.prefer_arcs:
+        center = resolver.center(operation.entity)
+        diameter = operation.hole_diameter or resolver.diameter(operation.entity)
+        if center is None or diameter is None:
+            return [_warning_pass(operation, tool, f"{operation.id}: cannot find helical pocket circle geometry for {operation.entity}")]
+        return helical_pocket_operation_to_toolpaths(operation, center, diameter, tool, safe_z)
+    return pocket_operation_to_toolpaths(_helical_pocket_as_pocket(operation), source_path, tool, safe_z)
 
 
 def _decorate_passes(

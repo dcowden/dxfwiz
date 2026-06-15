@@ -64,6 +64,8 @@ class ProjectService:
         geometry_svg = project_dir / "geometry.svg"
 
         original_dxf.write_bytes(content)
+        planner = self.load_planner()
+        arc_detection = planner.defaults.arc_detection
         logger.info("Cleaning DXF for project %s", project_id)
         clean_result = clean_dxf(
             original_dxf,
@@ -72,6 +74,9 @@ class ProjectService:
                 gap_tolerance=0.005,
                 duplicate_tolerance=0.0005,
                 min_segment_length=0.001,
+                arc_detection=arc_detection.mode if arc_detection else "OFF",
+                arc_tolerance=arc_detection.tolerance if arc_detection else 0.002,
+                reorient_to_origin=planner.defaults.origin.reorient_to_origin,
             ),
         )
         logger.info(

@@ -25,7 +25,7 @@ class SimulationStock(StrictModel):
 
 class SimulationSettings(StrictModel):
     xy_spacing: float | None = Field(default=None, gt=0)
-    xy_tool_fraction: float = Field(default=0.25, gt=0, le=1)
+    xy_tool_fraction: float = Field(default=0.5, gt=0, le=1)
     z_spacing: float | None = Field(default=None, gt=0)
     max_grid_cells: int = Field(default=20_000_000, gt=0)
     preview: bool = True

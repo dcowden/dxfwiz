@@ -21,6 +21,7 @@ class CleanDxfConfig:
     preserve_arcs: bool = True
     arc_detection: Literal["OFF", "FOR_PLANNING", "RECOVER"] = "OFF"
     arc_tolerance: float = 0.002
+    reorient_to_origin: bool = False
 
 
 @dataclass
@@ -33,6 +34,8 @@ class CleanDxfResult:
     duplicates_removed: int = 0
     endpoints_snapped: int = 0
     arcs_recovered: int = 0
+    origin_shift_x: float = 0.0
+    origin_shift_y: float = 0.0
     closed_loops: int = 0
     open_paths: int = 0
     warnings: list[str] = field(default_factory=list)
@@ -135,6 +138,9 @@ def clean_dxf(
     for index, chain in enumerate(open_chains, start=1):
         _add_lwpolyline(out_msp, chain, closed=False, layer="DXFWIZ_OPEN")
 
+    if config.reorient_to_origin:
+        result.origin_shift_x, result.origin_shift_y = _translate_modelspace_to_origin(out_msp)
+
     output_path.parent.mkdir(parents=True, exist_ok=True)
     out_doc.saveas(output_path)
     logger.info(
@@ -146,6 +152,72 @@ def clean_dxf(
         result.arcs_recovered,
     )
     return result
+
+
+def _translate_modelspace_to_origin(msp) -> tuple[float, float]:
+    bounds = _modelspace_bounds(msp)
+    if bounds is None:
+        return 0.0, 0.0
+    min_x, min_y, _max_x, _max_y = bounds
+    dx = -min_x
+    dy = -min_y
+    if abs(dx) <= 1e-12 and abs(dy) <= 1e-12:
+        return 0.0, 0.0
+    for entity in msp:
+        _translate_entity(entity, dx, dy)
+    return dx, dy
+
+
+def _modelspace_bounds(msp) -> tuple[float, float, float, float] | None:
+    points: list[Point] = []
+    for entity in msp:
+        if entity.dxftype() == "CIRCLE":
+            center = entity.dxf.center
+            radius = float(entity.dxf.radius)
+            points.extend(
+                [
+                    (float(center.x) - radius, float(center.y) - radius),
+                    (float(center.x) + radius, float(center.y) + radius),
+                ]
+            )
+        elif entity.dxftype() == "LWPOLYLINE":
+            points.extend((float(point[0]), float(point[1])) for point in entity.get_points("xy"))
+        elif entity.dxftype() == "LINE":
+            points.extend(
+                [
+                    (float(entity.dxf.start.x), float(entity.dxf.start.y)),
+                    (float(entity.dxf.end.x), float(entity.dxf.end.y)),
+                ]
+            )
+    if not points:
+        return None
+    xs = [point[0] for point in points]
+    ys = [point[1] for point in points]
+    return min(xs), min(ys), max(xs), max(ys)
+
+
+def _translate_entity(entity, dx: float, dy: float) -> None:
+    try:
+        entity.translate(dx, dy, 0.0)
+        return
+    except Exception:
+        pass
+    if entity.dxftype() == "CIRCLE":
+        center = entity.dxf.center
+        entity.dxf.center = (float(center.x) + dx, float(center.y) + dy, float(center.z))
+    elif entity.dxftype() == "LWPOLYLINE":
+        entity.set_points(
+            [
+                (float(x) + dx, float(y) + dy, float(start_width), float(end_width), float(bulge))
+                for x, y, start_width, end_width, bulge in entity.get_points("xyseb")
+            ],
+            format="xyseb",
+        )
+    elif entity.dxftype() == "LINE":
+        start = entity.dxf.start
+        end = entity.dxf.end
+        entity.dxf.start = (float(start.x) + dx, float(start.y) + dy, float(start.z))
+        entity.dxf.end = (float(end.x) + dx, float(end.y) + dy, float(end.z))
 
 
 def _line_segment(entity) -> Segment:

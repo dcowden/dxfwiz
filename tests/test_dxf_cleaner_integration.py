@@ -313,15 +313,6 @@ def test_real_dxf_supported_operations_simulate_material_removal(case):
             expected_removals=expected.removals,
         )
     )
-    preview_run = simulate_toolpath(
-        DexelSimulationRequest(
-            job=job,
-            machine=machine,
-            toolpath_plan=toolpath_response.plan,
-            stock=stock,
-            settings=settings,
-        )
-    )
     metrics = simulation_run.response.metrics
     contour_geometry = _contour_geometry_report(toolpath_response.plan)
     summary = {
@@ -329,8 +320,8 @@ def test_real_dxf_supported_operations_simulate_material_removal(case):
         "preview_operation_count": len({toolpath_pass.operation_id for toolpath_pass in toolpath_response.plan.passes}),
         "expected_removal_count": len(expected.removals),
         "expected_builder_warnings": expected.warnings,
-        "preview_errors": [issue.model_dump(mode="json") for issue in preview_run.response.errors],
-        "preview_warnings": [issue.model_dump(mode="json") for issue in preview_run.response.warnings],
+        "preview_errors": [issue.model_dump(mode="json") for issue in simulation_run.response.errors],
+        "preview_warnings": [issue.model_dump(mode="json") for issue in simulation_run.response.warnings],
         "errors": [issue.model_dump(mode="json") for issue in simulation_run.response.errors],
         "warnings": [issue.model_dump(mode="json") for issue in simulation_run.response.warnings],
         "metrics": metrics.model_dump(mode="json"),
@@ -339,9 +330,9 @@ def test_real_dxf_supported_operations_simulate_material_removal(case):
     dump_yaml_file(case.simulation_summary_path, summary)
     case.simulation_initial_path.write_bytes(
         render_dexel_preview_png(
-            preview_run.grid,
+            simulation_run.grid,
             f"{case.name} simulation initial",
-            depth=preview_run.grid.actual_depth * 0,
+            depth=simulation_run.grid.actual_depth * 0,
         )
     )
     case.simulation_final_path.write_bytes(
@@ -557,6 +548,7 @@ def _clean_config(planner: PlannerFile | None = None) -> CleanDxfConfig:
         min_segment_length=0.001,
         arc_detection=arc_detection.mode if arc_detection else "OFF",
         arc_tolerance=arc_detection.tolerance if arc_detection else 0.002,
+        reorient_to_origin=planner.defaults.origin.reorient_to_origin if planner is not None else False,
     )
 
 

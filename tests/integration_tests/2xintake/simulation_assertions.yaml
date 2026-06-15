@@ -5,7 +5,7 @@ max_rapid_collisions: 0
 max_unsafe_rapids: 0
 max_overcut_cells: 1500
 max_undercut_cells: 2500
-max_air_cut_moves: 150
+max_air_cut_moves: 320
 max_recut_cells: 210000
 geometry:
   max_contour_offset_median_error: 0.003

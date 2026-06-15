@@ -725,7 +725,7 @@ def _arc_move_points(
         (
             center_x + math.cos(start_angle + sweep * index / steps) * radius,
             center_y + math.sin(start_angle + sweep * index / steps) * radius,
-            z,
+            start[2] + (z - start[2]) * index / steps,
         )
         for index in range(steps + 1)
     ]

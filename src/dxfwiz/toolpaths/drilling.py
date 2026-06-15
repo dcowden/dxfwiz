@@ -277,6 +277,8 @@ def _helical_pocket_moves(
     moves = _helix_moves(center, radius, target_z, pitch, direction, safe_z, feed)
     if moves and moves[-1].get("type") == "rapid":
         moves.pop()
+    current_xy = _current_xy_from_moves(moves, center, radius)
+    start_angle = math.atan2(current_xy[1] - center[1], current_xy[0] - center[0])
     spiral_moves = _spiral_out_arc_moves(
         center=center,
         start_radius=radius,
@@ -285,6 +287,7 @@ def _helical_pocket_moves(
         stepover=stepover,
         direction=direction,
         feed=feed,
+        start_angle=start_angle,
     )
     moves.extend(spiral_moves)
     current_xy = _current_xy_from_moves(moves, center, final_radius)
@@ -302,6 +305,7 @@ def _spiral_out_arc_moves(
     stepover: float,
     direction: str,
     feed: float,
+    start_angle: float = 0.0,
 ) -> list[dict]:
     if final_radius <= start_radius + 1e-9:
         return []
@@ -311,10 +315,10 @@ def _spiral_out_arc_moves(
     segment_count = max(1, math.ceil(total_angle / max_sweep))
     signed_total = total_angle * (1 if direction == "ccw" else -1)
     moves = []
-    previous = _spiral_point(center, start_radius, 0.0)
+    previous = _spiral_point(center, start_radius, start_angle)
     for index in range(1, segment_count + 1):
         t = index / segment_count
-        angle = signed_total * t
+        angle = start_angle + signed_total * t
         radius = final_radius if index == segment_count else start_radius + (final_radius - start_radius) * t
         end = _spiral_point(center, radius, angle)
         move = _spiral_arc_segment(
@@ -322,7 +326,7 @@ def _spiral_out_arc_moves(
             start=previous,
             end=end,
             start_radius=start_radius + (final_radius - start_radius) * ((index - 1) / segment_count),
-            angle=signed_total * ((index - 1) / segment_count),
+            angle=start_angle + signed_total * ((index - 1) / segment_count),
             radial_growth_per_radian=radial_growth_per_radian,
             direction=direction,
             z=z,

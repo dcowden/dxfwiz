@@ -7,7 +7,14 @@ from shapely.geometry import GeometryCollection, LineString, MultiLineString, Mu
 from dxfwiz.schemas.job import PocketOperation
 from dxfwiz.schemas.machine import Tool
 from dxfwiz.toolpaths.model import SourcePath, ToolpathPass
-from dxfwiz.toolpaths.operations import _contour_feed_moves, _depth_passes, _orient_cut_points, _polyline_feed_moves, source_path_points
+from dxfwiz.toolpaths.operations import (
+    _contour_feed_moves,
+    _depth_passes,
+    _orient_cut_points,
+    _polyline_feed_moves,
+    _ramped_polyline_feed_moves,
+    source_path_points,
+)
 
 
 @dataclass(frozen=True)
@@ -349,6 +356,10 @@ def _enter_path_moves(
     moves: list[dict] = [{"type": "rapid", "x": start[0], "y": start[1], "z": safe_z}]
     if ramp:
         moves.append({"type": "line", "z": 0.0, "feed": feed})
+        if pocket_path.closed:
+            moves.extend(_closed_path_ramp_entry_moves(points, z_bottom, feed))
+            moves.extend(_polyline_feed_moves([*points, points[0]], z_bottom, feed, closed=False))
+            return moves
         first_cut = points[1]
         moves.append({"type": "line", "x": first_cut[0], "y": first_cut[1], "z": z_bottom, "feed": feed})
         remaining = points[2:]
@@ -365,6 +376,30 @@ def _enter_path_moves(
         moves.append({"type": "line", "z": z_bottom, "feed": feed})
         moves.extend(_cut_path_moves(pocket_path, z_bottom, feed, include_first=False))
     return moves
+
+
+def _closed_path_ramp_entry_moves(
+    points: list[tuple[float, float]],
+    z_bottom: float,
+    feed: float,
+) -> list[dict]:
+    if len(points) < 2:
+        return []
+    closed_points = [*points, points[0]]
+    segment_lengths = [
+        _distance(first, second)
+        for first, second in zip(closed_points, closed_points[1:], strict=False)
+    ]
+    total_length = sum(segment_lengths)
+    if total_length <= 1e-9:
+        return []
+    ramp_points = [(closed_points[0][0], closed_points[0][1], 0.0)]
+    traveled = 0.0
+    for point, segment_length in zip(closed_points[1:], segment_lengths, strict=False):
+        traveled += segment_length
+        fraction = min(1.0, traveled / total_length)
+        ramp_points.append((point[0], point[1], z_bottom * fraction))
+    return _ramped_polyline_feed_moves(ramp_points, feed)
 
 
 def _enter_path_endpoint(pocket_path: _PocketPath, ramp: bool) -> tuple[float, float]:
@@ -440,6 +475,10 @@ def _can_cut_link(area, start: tuple[float, float], end: tuple[float, float]) ->
 
 def _distance_sq(first: tuple[float, float], second: tuple[float, float]) -> float:
     return (first[0] - second[0]) ** 2 + (first[1] - second[1]) ** 2
+
+
+def _distance(first: tuple[float, float], second: tuple[float, float]) -> float:
+    return _distance_sq(first, second) ** 0.5
 
 
 def _closed_path_moves(

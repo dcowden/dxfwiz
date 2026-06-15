@@ -8,6 +8,7 @@ from dxfwiz.schemas.common import AxisRange, Point2D, StrictModel, Units
 WorkholdingOption = Literal["clamps", "screws", "tape", "vacuum"]
 PartHoldingOption = Literal["onionskin", "z_rollers", "z_presser", "tabs"]
 OperationSortPriority = Literal["tool", "group", "role", "nest_order"]
+ToolpathEngine = Literal["cavalier", "legacy"]
 
 
 class WorkEnvelope(StrictModel):
@@ -76,6 +77,7 @@ class Machine(StrictModel):
     screw_clearance: float | None = Field(default=None, ge=0)
     maximum_plug_size: float = Field(default=0.25, gt=0)
     operation_sort: list[OperationSortPriority] = Field(default_factory=lambda: ["tool", "group", "nest_order"])
+    toolpath_engine: ToolpathEngine = "cavalier"
     workholding: WorkholdingConfig
     part_holding: list[PartHoldingOption]
     work_envelope: WorkEnvelope

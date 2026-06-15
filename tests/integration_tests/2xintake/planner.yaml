@@ -15,6 +15,8 @@ defaults:
     thickness: 0.25
     z_zero: stock_top
   origin_location: bottom_left
+  origin:
+    reorient_to_origin: true
   workholding: [screws]
   part_holding: [tabs]
   default_tool: t5
@@ -32,7 +34,7 @@ defaults:
     tolerance: 0.002
   simulation:
     enabled: true
-    xy_spacing: 0.015625
+    xy_spacing: 0.03125
     z_spacing: 0.01
     max_grid_cells: 80000000
     preview: true

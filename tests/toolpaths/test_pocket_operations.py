@@ -90,6 +90,21 @@ def test_pocket_ramp_entry_changes_xy_and_z():
     PREVIEWS.append(("test_pocket_ramp_entry_changes_xy_and_z", source_path, passes))
 
 
+def test_adaptive_pocket_ramp_entry_tapers_around_closed_loop():
+    source_path = rectangle_source_path("p3-adaptive-ramp", width=3, height=2)
+    tool = make_test_tool(diameter=0.25, depth_per_pass=0.125)
+    operation = make_pocket_operation(strategy="adaptive", lead_in={"type": "ramp", "length": 0.5})
+
+    passes = pocket_operation_to_toolpaths(operation, source_path, tool, safe_z=0.5)
+
+    ramp_moves = _xy_line_moves_before_first_bottom_cleanup(passes[0], -0.125)
+    assert len(ramp_moves) >= 4
+    assert ramp_moves[-1].z == pytest.approx(-0.125)
+    assert any(-0.125 < move.z < 0 for move in ramp_moves)
+    assert all(next_move.z <= move.z + 1e-9 for move, next_move in zip(ramp_moves, ramp_moves[1:], strict=False))
+    PREVIEWS.append(("test_adaptive_pocket_ramp_entry_tapers_around_closed_loop", source_path, passes))
+
+
 def test_pocket_without_ramp_uses_vertical_stepdowns():
     source_path = rectangle_source_path("p4", width=3, height=2)
     tool = make_test_tool(diameter=0.25, depth_per_pass=0.125)
@@ -204,6 +219,18 @@ def test_pocket_wall_finish_uses_inner_square_contour_for_square_pocket():
 
 def _xy_line_moves(toolpath_pass):
     return [move for move in toolpath_pass.moves if move.type == "line" and move.x is not None and move.y is not None]
+
+
+def _xy_line_moves_before_first_bottom_cleanup(toolpath_pass, bottom_z: float):
+    moves = []
+    bottom_moves_seen = 0
+    for move in _xy_line_moves(toolpath_pass):
+        if move.z == pytest.approx(bottom_z):
+            bottom_moves_seen += 1
+        if bottom_moves_seen > 1:
+            break
+        moves.append(move)
+    return moves
 
 
 def make_pocket_operation(**overrides) -> PocketOperation:

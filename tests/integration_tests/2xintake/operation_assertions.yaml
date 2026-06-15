@@ -5,15 +5,15 @@ helical_pockets: 14
 generated_screw_holes:
   count: 9
   locations:
-    - {x: 28, y: 20}
-    - {x: 28, y: 40}
-    - {x: 53, y: 20}
-    - {x: 53, y: 40}
-    - {x: 40, y: 31}
-    - {x: 38, y: 24}
-    - {x: 34, y: 30}
-    - {x: 49, y: 31}
-    - {x: 44, y: 38}
+    - {x: 0, y: 0}
+    - {x: 0, y: 20}
+    - {x: 26, y: 0}
+    - {x: 26, y: 20}
+    - {x: 14, y: 10}
+    - {x: 10, y: 4}
+    - {x: 11, y: 15}
+    - {x: 22, y: 10}
+    - {x: 0, y: 10}
 generated_clamps:
   count: 0
   positions: []

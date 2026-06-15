@@ -3,6 +3,7 @@ from pathlib import Path
 import ezdxf
 
 from dxfwiz.dxf import CleanDxfConfig, clean_dxf
+from dxfwiz.dxf.geometry import write_geometry_yaml
 
 
 def test_clean_closed_rectangle_from_unordered_lines(tmp_path):
@@ -134,6 +135,36 @@ def test_circle_is_preserved_as_closed_loop(tmp_path):
     assert len(ezdxf.readfile(fixed).modelspace().query("CIRCLE")) == 1
 
 
+def test_reorient_to_origin_is_disabled_by_default(tmp_path):
+    source = tmp_path / "offset_rectangle.dxf"
+    fixed = tmp_path / "fixed.dxf"
+    _write_offset_rectangle(source)
+
+    result = clean_dxf(source, fixed)
+
+    assert result.origin_shift_x == 0.0
+    assert result.origin_shift_y == 0.0
+    assert _fixed_bounds(fixed) == (10.0, 20.0, 12.0, 21.0)
+
+
+def test_reorient_to_origin_moves_fixed_dxf_and_geometry_yaml(tmp_path):
+    source = tmp_path / "offset_rectangle.dxf"
+    fixed = tmp_path / "fixed.dxf"
+    geom = tmp_path / "geom.yaml"
+    _write_offset_rectangle(source)
+
+    result = clean_dxf(source, fixed, CleanDxfConfig(reorient_to_origin=True))
+    geom_data = write_geometry_yaml(fixed, geom, original_file=source.name, cleaned_file=fixed.name)
+
+    assert result.origin_shift_x == -10.0
+    assert result.origin_shift_y == -20.0
+    assert _fixed_bounds(fixed) == (0.0, 0.0, 2.0, 1.0)
+    assert geom_data["summary"]["bounding_box"] == {
+        "min": {"x": 0.0, "y": 0.0},
+        "max": {"x": 2.0, "y": 1.0},
+    }
+
+
 def test_fixed_dxf_avoids_app_specific_xdata_for_cad_compatibility(tmp_path):
     source = tmp_path / "rectangle.dxf"
     fixed = tmp_path / "fixed.dxf"
@@ -160,6 +191,35 @@ def _write_gapped_rectangle(path: Path, gap: float) -> None:
     msp.add_line((1, 1), (gap, 1))
     msp.add_line((0, 1), (0, gap))
     doc.saveas(path)
+
+
+def _write_offset_rectangle(path: Path) -> None:
+    doc = ezdxf.new("R2010")
+    msp = doc.modelspace()
+    msp.add_line((10, 20), (12, 20))
+    msp.add_line((12, 20), (12, 21))
+    msp.add_line((12, 21), (10, 21))
+    msp.add_line((10, 21), (10, 20))
+    doc.saveas(path)
+
+
+def _fixed_bounds(path: Path) -> tuple[float, float, float, float]:
+    points = []
+    for entity in ezdxf.readfile(path).modelspace():
+        if entity.dxftype() == "LWPOLYLINE":
+            points.extend((float(point[0]), float(point[1])) for point in entity.get_points("xy"))
+        elif entity.dxftype() == "CIRCLE":
+            center = entity.dxf.center
+            radius = float(entity.dxf.radius)
+            points.extend(
+                [
+                    (float(center.x) - radius, float(center.y) - radius),
+                    (float(center.x) + radius, float(center.y) + radius),
+                ]
+            )
+    xs = [point[0] for point in points]
+    ys = [point[1] for point in points]
+    return min(xs), min(ys), max(xs), max(ys)
 
 
 def _lwpolylines(path: Path):
