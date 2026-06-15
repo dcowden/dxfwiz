@@ -170,6 +170,47 @@ def test_contour_with_ramping_generates_connected_spiral_descent():
     PREVIEWS.append(("test_contour_with_ramping_generates_connected_spiral_descent", source_path, passes))
 
 
+def test_outer_contour_ramps_down_around_loop_without_vertical_stepdowns():
+    source_path = rectangle_source_path("outer-ramp", width=2.5, height=1.25)
+    tool = make_test_tool(diameter=0.25, depth_per_pass=0.1)
+    operation = ContourOperation.model_validate(
+        {
+            "id": "op-outer-ramp",
+            "type": "contour",
+            "entity": "outer-ramp",
+            "tool": "t5",
+            "depth": 0.24,
+            "extra_depth": 0.01,
+            "offset": "outside",
+            "ramping": True,
+            "roughing": {
+                "enabled": True,
+                "depth_per_pass": 0.08,
+                "side_allowance": 0.0,
+                "bottom_allowance": 0.0,
+                "milling_direction": "climb",
+            },
+            "finishing": {"enabled": False},
+        }
+    )
+
+    passes = contour_operation_to_toolpaths(operation, source_path, tool, safe_z=0.5)
+
+    assert [toolpath_pass.id for toolpath_pass in passes] == ["op-outer-ramp-rough-spiral"]
+    z_values = _line_move_z_values(passes[0])
+    xy_values = _line_move_xy_values(passes[0])
+    negative_vertical_stepdowns = [
+        z
+        for z, xy in zip(z_values, xy_values, strict=True)
+        if xy == (None, None) and z < -1e-9
+    ]
+    assert negative_vertical_stepdowns == []
+    assert z_values[-1] == pytest.approx(-0.25)
+    assert all(next_z <= z + 1e-9 for z, next_z in zip(z_values, z_values[1:], strict=False))
+    assert any(-0.24 < z < -0.01 and x is not None and y is not None for z, (x, y) in zip(z_values, xy_values, strict=True))
+    PREVIEWS.append(("test_outer_contour_ramps_down_around_loop_without_vertical_stepdowns", source_path, passes))
+
+
 def test_contour_with_ramping_and_finish_does_not_duplicate_bottom_cleanup():
     source_path = rectangle_source_path("e4", width=4, height=2)
     tool = make_test_tool(diameter=0.25, depth_per_pass=0.125)

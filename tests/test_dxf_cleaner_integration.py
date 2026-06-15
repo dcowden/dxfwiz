@@ -3,6 +3,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import ezdxf
+import numpy as np
 import pytest
 from shapely.geometry import Point, box
 
@@ -51,6 +52,8 @@ class DxfCase:
     simulation_final_path: Path
     simulation_summary_path: Path
     contour_error_path: Path
+    recut_summary_path: Path
+    recut_heatmap_path: Path
 
 
 def real_dxf_cases() -> list[DxfCase]:
@@ -91,6 +94,8 @@ def real_dxf_cases() -> list[DxfCase]:
                 simulation_final_path=output_dir / f"{source_path.stem}_simulation_final.png",
                 simulation_summary_path=output_dir / f"{source_path.stem}_simulation_summary.yaml",
                 contour_error_path=output_dir / f"{source_path.stem}_contour_offset_errors.png",
+                recut_summary_path=output_dir / f"{source_path.stem}_recut_analysis.yaml",
+                recut_heatmap_path=output_dir / f"{source_path.stem}_recut_heatmap.png",
             )
         )
     return cases
@@ -315,6 +320,7 @@ def test_real_dxf_supported_operations_simulate_material_removal(case):
     )
     metrics = simulation_run.response.metrics
     contour_geometry = _contour_geometry_report(toolpath_response.plan)
+    recut_analysis = _recut_analysis_report(simulation_run.grid)
     summary = {
         "supported_operation_count": len(expected.supported_operation_ids),
         "preview_operation_count": len({toolpath_pass.operation_id for toolpath_pass in toolpath_response.plan.passes}),
@@ -326,8 +332,10 @@ def test_real_dxf_supported_operations_simulate_material_removal(case):
         "warnings": [issue.model_dump(mode="json") for issue in simulation_run.response.warnings],
         "metrics": metrics.model_dump(mode="json"),
         "contour_geometry": contour_geometry,
+        "recut_analysis": recut_analysis,
     }
     dump_yaml_file(case.simulation_summary_path, summary)
+    dump_yaml_file(case.recut_summary_path, recut_analysis)
     case.simulation_initial_path.write_bytes(
         render_dexel_preview_png(
             simulation_run.grid,
@@ -344,6 +352,7 @@ def test_real_dxf_supported_operations_simulate_material_removal(case):
         )
     )
     _write_contour_error_png(toolpath_response.plan, case.contour_error_path)
+    _write_recut_heatmap_png(simulation_run.grid, case.recut_heatmap_path)
 
     assert len(simulation_run.response.errors) <= assertions.get("max_errors", 0)
     assert len(simulation_run.response.warnings) <= assertions.get("max_warnings", 999999)
@@ -720,6 +729,67 @@ def _assert_gcode(gcode: str, assertions: dict) -> None:
             f"Expected G-code to include {text!r} at least {item['count']} times, "
             f"got {gcode.count(text)}"
         )
+
+
+def _recut_analysis_report(grid, top_n: int = 12) -> dict:
+    cut_count = grid.cut_count
+    recut_mask = cut_count > 1
+    excessive_mask = cut_count > 2
+    operation_rows = []
+    for operation_index in sorted(int(index) for index in np.unique(grid.last_operation_id[recut_mask]) if index >= 0):
+        mask = recut_mask & (grid.last_operation_id == operation_index)
+        ys, xs = np.where(mask)
+        if xs.size == 0:
+            continue
+        operation_rows.append(
+            {
+                "operation_id": grid.operation_lookup.get(operation_index, f"unknown-{operation_index}"),
+                "recut_cells": int(xs.size),
+                "excessive_recut_cells": int(np.count_nonzero(excessive_mask & (grid.last_operation_id == operation_index))),
+                "max_cut_count": int(cut_count[mask].max(initial=0)),
+                "bbox": {
+                    "min": {"x": float(grid.x_values[xs].min()), "y": float(grid.y_values[ys].min())},
+                    "max": {"x": float(grid.x_values[xs].max()), "y": float(grid.y_values[ys].max())},
+                },
+            }
+        )
+    operation_rows.sort(key=lambda row: (row["recut_cells"], row["max_cut_count"]), reverse=True)
+    return {
+        "note": "cut_count excludes touches after a cell is already cut through the stock thickness",
+        "recut_cells": int(np.count_nonzero(recut_mask)),
+        "excessive_recut_cells": int(np.count_nonzero(excessive_mask)),
+        "max_cut_count": int(cut_count.max(initial=0)),
+        "top_last_operations": operation_rows[:top_n],
+    }
+
+
+def _write_recut_heatmap_png(grid, path: Path) -> None:
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    heat = np.where(grid.cut_count > 1, grid.cut_count, np.nan)
+    fig, ax = plt.subplots(figsize=(8, 6), dpi=160)
+    extent = [
+        float(grid.x_values[0] - grid.xy_spacing / 2),
+        float(grid.x_values[-1] + grid.xy_spacing / 2),
+        float(grid.y_values[0] - grid.xy_spacing / 2),
+        float(grid.y_values[-1] + grid.xy_spacing / 2),
+    ]
+    image = ax.imshow(heat, origin="lower", extent=extent, cmap="magma", interpolation="nearest")
+    if np.isfinite(heat).any():
+        colorbar = fig.colorbar(image, ax=ax, shrink=0.8)
+        colorbar.set_label("cut count")
+    ax.set_title("Recut cells (cut_count > 1)")
+    ax.set_xlabel("X")
+    ax.set_ylabel("Y")
+    ax.set_aspect("equal", adjustable="box")
+    ax.grid(True, color="#e5e7eb", linewidth=0.25, alpha=0.5)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fig.tight_layout()
+    fig.savefig(path, format="png", bbox_inches="tight")
+    plt.close(fig)
 
 
 def _contour_geometry_report(plan: ToolpathPlan) -> list[dict]:

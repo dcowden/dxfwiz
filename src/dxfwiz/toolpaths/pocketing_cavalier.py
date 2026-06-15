@@ -15,6 +15,7 @@ from dxfwiz.toolpaths.operations import (
     _depth_passes,
     _layered_line_moves,
     _spiral_line_moves,
+    _unmachinable_contour_pass,
     source_path_points,
 )
 
@@ -159,34 +160,62 @@ def contour_operation_to_cavalier_toolpaths(
                     moves=moves,
                 )
             )
+        else:
+            passes.append(
+                _unmachinable_contour_pass(
+                    operation,
+                    source_path,
+                    tool,
+                    "rough_contour",
+                    f"{operation.id}-cavc-rough",
+                    -depths[-1],
+                    abs(rough_offset),
+                )
+            )
 
     if operation.finishing.enabled and operation.finishing.side:
         finish_offset = _contour_offset_distance(operation.offset, tool.diameter, 0.0)
         finish_paths = _offset_paths(source_path, operation.offset, finish_offset)
-        for index in range(1, operation.finishing.passes + 1):
-            moves = []
-            for path in finish_paths:
-                if _has_active_tabs(operation):
-                    moves.extend(_closed_line_moves(source_path_points(path), -total_depth, safe_z, feed, operation, tool))
-                else:
-                    moves.extend(_closed_source_path_moves(path, -total_depth, safe_z, feed))
-            passes.append(
-                ToolpathPass(
-                    id=f"{operation.id}-cavc-finish-{index}",
-                    operation_id=operation.id,
-                    entity=operation.entity,
-                    kind="finish_contour",
-                    tool=operation.tool,
-                    tool_diameter=tool.diameter,
-                    feed_rate=feed,
-                    z_top=0.0,
-                    z_bottom=-total_depth,
-                    source_path=source_path.id,
-                    offset_side=operation.offset,
-                    offset_distance=abs(finish_offset),
-                    milling_direction=operation.finishing.milling_direction,
-                    moves=moves,
+        if finish_paths:
+            for index in range(1, operation.finishing.passes + 1):
+                moves = []
+                for path in finish_paths:
+                    if _has_active_tabs(operation):
+                        moves.extend(
+                            _closed_line_moves(source_path_points(path), -total_depth, safe_z, feed, operation, tool)
+                        )
+                    else:
+                        moves.extend(_closed_source_path_moves(path, -total_depth, safe_z, feed))
+                passes.append(
+                    ToolpathPass(
+                        id=f"{operation.id}-cavc-finish-{index}",
+                        operation_id=operation.id,
+                        entity=operation.entity,
+                        kind="finish_contour",
+                        tool=operation.tool,
+                        tool_diameter=tool.diameter,
+                        feed_rate=feed,
+                        z_top=0.0,
+                        z_bottom=-total_depth,
+                        source_path=source_path.id,
+                        offset_side=operation.offset,
+                        offset_distance=abs(finish_offset),
+                        milling_direction=operation.finishing.milling_direction,
+                        moves=moves,
+                    )
                 )
+        else:
+            passes.extend(
+                _unmachinable_contour_pass(
+                    operation,
+                    source_path,
+                    tool,
+                    "finish_contour",
+                    f"{operation.id}-cavc-finish-{index}",
+                    -total_depth,
+                    abs(finish_offset),
+                )
+                for index in range(1, operation.finishing.passes + 1)
             )
     return passes
 
@@ -203,9 +232,46 @@ def helical_contour_operation_to_cavalier_toolpaths(
     feed = operation.feed_rate or tool.feed_rate
     cutter_radius = tool.diameter / 2
     direction = "ccw" if operation.milling_direction == "climb" else "cw"
+    _source_center, source_radius = _circle_geometry_from_source_path(source_path)
+    finish_radius = source_radius - cutter_radius
+    if finish_radius <= 0:
+        return [
+            ToolpathPass(
+                id=f"{operation.id}-cavc-warning",
+                operation_id=operation.id,
+                entity=operation.entity,
+                kind="helical_contour",
+                tool=operation.tool,
+                tool_diameter=tool.diameter,
+                feed_rate=feed,
+                z_top=0.0,
+                z_bottom=target,
+                source_path=source_path.id,
+                offset_side="inside",
+                offset_distance=cutter_radius,
+                milling_direction=operation.milling_direction,
+                moves=[],
+                warnings=[
+                    f"{operation.id}: tool diameter {tool.diameter:.6f} is too large for hole diameter {source_radius * 2:.6f}"
+                ],
+            )
+        ]
+    rough_offset = cutter_radius + finishing_allowance
+    skip_roughing_for_fit = (
+        operation.finishing.enabled
+        and operation.finishing.side
+        and 0 < finish_radius <= finishing_allowance
+        and operation.skip_roughing_when_finish_fits
+    )
     finish_paths = _offset_paths(source_path, "inside", cutter_radius)
-    rough_paths = _offset_paths(source_path, "inside", cutter_radius + finishing_allowance)
+    rough_paths = [] if skip_roughing_for_fit else _offset_paths(source_path, "inside", rough_offset)
     passes: list[ToolpathPass] = []
+    warnings = []
+    if skip_roughing_for_fit:
+        warnings.append(
+            f"{operation.id}: skipped roughing pass to accommodate selected tool; "
+            f"finish radius {finish_radius:.6f} fits but requested roughing allowance {finishing_allowance:.6f} does not."
+        )
 
     if rough_paths:
         rough_center, rough_radius = _circle_geometry_from_source_path(rough_paths[0])
@@ -222,13 +288,36 @@ def helical_contour_operation_to_cavalier_toolpaths(
                 z_bottom=target,
                 source_path=source_path.id,
                 offset_side="inside",
-                offset_distance=cutter_radius + finishing_allowance,
+                offset_distance=rough_offset,
                 milling_direction=operation.milling_direction,
                 moves=_helix_moves(rough_center, rough_radius, target, operation.pitch, direction, safe_z, feed),
             )
         )
 
     if operation.finishing.enabled and operation.finishing.side:
+        if not finish_paths:
+            passes.append(
+                ToolpathPass(
+                    id=f"{operation.id}-cavc-finish",
+                    operation_id=operation.id,
+                    entity=operation.entity,
+                    kind="finish_contour",
+                    tool=operation.tool,
+                    tool_diameter=tool.diameter,
+                    feed_rate=feed,
+                    z_top=0.0,
+                    z_bottom=target,
+                    source_path=source_path.id,
+                    offset_side="inside",
+                    offset_distance=cutter_radius,
+                    milling_direction=operation.finishing.milling_direction,
+                    moves=[],
+                    warnings=[
+                        f"{operation.id}: tool diameter {tool.diameter:.6f} leaves no machinable area for hole diameter {source_radius * 2:.6f}"
+                    ],
+                )
+            )
+            return passes
         finish_center, finish_radius = _circle_geometry_from_source_path(finish_paths[0])
         passes.append(
             ToolpathPass(
@@ -246,6 +335,7 @@ def helical_contour_operation_to_cavalier_toolpaths(
                 offset_distance=cutter_radius,
                 milling_direction=operation.finishing.milling_direction,
                 moves=_finish_circle_moves(finish_center, finish_radius, target, direction, safe_z, feed),
+                warnings=warnings if skip_roughing_for_fit else [],
             )
         )
     return passes
@@ -454,6 +544,11 @@ def _path_set_pass(
                     moves.extend(_closed_source_path_moves(path, z_bottom, safe_z, feed, ramp_entry=ramp_entry))
                 else:
                     moves.extend(_open_source_path_moves(path, z_bottom, safe_z, feed))
+    warnings = []
+    if not paths:
+        warnings.append(
+            f"{operation.id}: pocket offset {offset_distance:.6f} leaves no machinable area for entity {operation.entity}"
+        )
     return ToolpathPass(
         id=pass_id,
         operation_id=operation.id,
@@ -469,6 +564,7 @@ def _path_set_pass(
         offset_distance=offset_distance,
         milling_direction=operation.roughing.milling_direction,
         moves=moves,
+        warnings=warnings,
     )
 
 

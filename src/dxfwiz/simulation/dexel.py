@@ -240,7 +240,7 @@ class DexelGrid:
         depth = np.minimum(depth, self.stock.thickness).astype(np.float32)
         current = self.actual_depth[y_slice, x_slice]
         changed = mask & (depth > current + 1e-6)
-        touched = mask & (depth > 1e-9)
+        touched = mask & (depth > 1e-9) & (current < self.stock.thickness - 1e-6)
         np.maximum(current, depth, out=current, where=mask)
         if np.any(touched):
             cut_window = self.cut_count[y_slice, x_slice]

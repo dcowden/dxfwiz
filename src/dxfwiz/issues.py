@@ -167,7 +167,7 @@ def classify_toolpath_warning(message: str) -> str:
     lowered = message.lower()
     if "too large for hole diameter" in lowered or "no machinable area" in lowered and "tool diameter" in lowered:
         return "E3001"
-    if "skipped roughing pass" in lowered:
+    if "skipped roughing pass" in lowered or "cannot be machined for entity" in lowered:
         return "W2008"
     if "helical contour leaves an interior slug" in lowered or "helical drilling leaves an interior slug" in lowered:
         return "W2004"

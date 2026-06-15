@@ -3,7 +3,7 @@ max_warnings: 100
 min_supported_operations: 1
 max_rapid_collisions: 0
 max_unsafe_rapids: 0
-max_overcut_cells: 1000000
-max_undercut_cells: 1000000
-max_air_cut_moves: 3000
-max_recut_cells: 1000000
+max_overcut_cells: 100
+max_undercut_cells: 150
+max_air_cut_moves: 300
+max_recut_cells: 13000

@@ -14,6 +14,7 @@ from dxfwiz.schemas.common import Point2D
 from dxfwiz.schemas.job import ContourOperation, HelicalContourOperation, HelicalPocketOperation, PocketOperation
 from dxfwiz.schemas.machine import Tool
 from dxfwiz.toolpaths import pocketing_cavalier as cavalier_pocketing
+from dxfwiz.toolpaths import operations as legacy_operations
 from dxfwiz.toolpaths.core import GeometryResolver
 from dxfwiz.toolpaths.drilling import helical_contour_operation_to_toolpaths, helical_pocket_operation_to_toolpaths
 from dxfwiz.toolpaths.model import ArcMove, LineMove, RapidMove, SourceArcSegment, SourceLineSegment, SourcePath, ToolpathPass
@@ -154,6 +155,7 @@ def test_render_shapely_vs_cavalier_pocket_comparison_svg():
     )
 
     svg = render_comparison_svg(rows, OUTPUT_DIR / "test_cavalier_pocket_comparison.svg")
+    combined_svg = render_comparison_svg(rows, OUTPUT_DIR / "cavalier_vs_legacy_combined.svg")
 
     assert "four-lobe dogbone split pocket" in svg
     assert "2xintake triangle cutout e3" in svg
@@ -168,10 +170,44 @@ def test_render_shapely_vs_cavalier_pocket_comparison_svg():
     assert "circle offsets preserve arcs" in svg
     assert "shapely top" in svg
     assert "cavalier top" in svg
+    assert "2xintake outer contour e2" in combined_svg
+    assert "boundary-linked raster / rounded side bulge" in combined_svg
     if cavalier.is_available():
         assert all(cavalier_passes for _label, _source, _shapely, cavalier_passes, _error, _ideal in rows)
     else:
         assert "native module is not installed" in svg
+
+
+def test_comparison_iso_projects_cut_depth_below_reference_profile():
+    top = _project((1.0, 1.0, 0.0), iso=True)
+    cut = _project((1.0, 1.0, -0.25), iso=True)
+
+    assert cut[1] < top[1]
+
+
+@pytest.mark.skipif(not cavalier.is_available(), reason="dxfwiz_cavc native module is not installed")
+def test_cavalier_non_tabbed_paths_do_not_use_legacy_arc_recovery(monkeypatch):
+    def fail_arc_recovery(*_args, **_kwargs):
+        raise AssertionError("Cavalier non-tabbed paths should preserve SourceArcSegment moves directly")
+
+    monkeypatch.setattr(legacy_operations, "_recover_arc_segments", fail_arc_recovery)
+    tool = make_test_tool(diameter=0.25, depth_per_pass=0.25)
+
+    contour_passes = contour_operation_to_cavalier_toolpaths(
+        make_contour_operation("op-cavc-no-recovery-contour", "cavc-no-recovery-contour"),
+        rounded_bulged_rectangle_source_path("cavc-no-recovery-contour"),
+        tool,
+        safe_z=0.5,
+    )
+    pocket_passes = pocket_operation_to_cavalier_toolpaths(
+        make_pocket_operation(strategy="offset", stepover_percent=80),
+        rounded_bulged_rectangle_source_path("cavc-no-recovery-pocket"),
+        tool,
+        safe_z=0.5,
+    )
+
+    assert any(move.type == "arc" for toolpath_pass in contour_passes for move in toolpath_pass.moves)
+    assert any(move.type == "arc" for toolpath_pass in pocket_passes for move in toolpath_pass.moves)
 
 
 def test_cavalier_source_path_bulge_round_trip_preserves_arcs():
@@ -373,6 +409,42 @@ def test_cavalier_contour_with_tabs_hops_over_tab_span():
     assert any(z == pytest.approx(-0.15) for z in z_values)
     deep_segments = _xy_segments_at_z(passes[0], -0.25)
     assert not any(_segment_crosses_tab_span(segment, 1.38, 2.62) for segment in deep_segments)
+
+
+@pytest.mark.skipif(not cavalier.is_available(), reason="dxfwiz_cavc native module is not installed")
+def test_cavalier_inside_contour_warns_when_tool_does_not_fit():
+    tool = make_test_tool(diameter=0.4, depth_per_pass=0.1)
+    source_path = square_source_path("too-small-cavc-slot", 1.0, 0.39)
+    operation = ContourOperation.model_validate(
+        {
+            "id": "op-cavc-inside-too-big",
+            "type": "contour",
+            "entity": "too-small-cavc-slot",
+            "tool": "t5",
+            "depth": 0.1,
+            "offset": "inside",
+            "roughing": {
+                "enabled": True,
+                "depth_per_pass": 0.1,
+                "side_allowance": 0.0,
+                "bottom_allowance": 0.0,
+                "milling_direction": "climb",
+            },
+            "finishing": {
+                "enabled": True,
+                "side": True,
+                "bottom": False,
+                "passes": 1,
+                "milling_direction": "climb",
+            },
+        }
+    )
+
+    passes = contour_operation_to_cavalier_toolpaths(operation, source_path, tool, safe_z=0.5)
+
+    assert [toolpath_pass.kind for toolpath_pass in passes] == ["rough_contour", "finish_contour"]
+    assert all(toolpath_pass.moves == [] for toolpath_pass in passes)
+    assert all("cannot be machined" in toolpath_pass.warnings[0] for toolpath_pass in passes)
 
 
 def pocket_comparison_row(
@@ -889,7 +961,7 @@ def _project(point: tuple[float, float, float], iso: bool) -> tuple[float, float
     x, y, z = point
     if not iso:
         return x, y
-    return x - y * 0.48, (x + y) * 0.24 - z * 5.0
+    return x - y * 0.48, (x + y) * 0.24 + z * 5.0
 
 
 def _css_for_kind(kind: str) -> str:

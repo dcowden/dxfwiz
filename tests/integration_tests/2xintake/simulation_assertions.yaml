@@ -3,10 +3,10 @@ max_warnings: 100
 min_supported_operations: 1
 max_rapid_collisions: 0
 max_unsafe_rapids: 0
-max_overcut_cells: 1500
-max_undercut_cells: 2500
-max_air_cut_moves: 320
-max_recut_cells: 210000
+max_overcut_cells: 500
+max_undercut_cells: 800
+max_air_cut_moves: 380
+max_recut_cells: 45000
 geometry:
   max_contour_offset_median_error: 0.003
   max_contour_offset_max_error: 0.06

@@ -46,6 +46,7 @@ operation_advice:
     - "Always start by inspecting the geometry and finding the largest tool diameter that will do the job."
     - "Only use 1/8 inch tools if necessary to meet geometry or finish criteria."
     - "Always generate transition ramps into cuts."
+    - "Set ramping: true on contour operations so outside profiles spiral down around the contour instead of plunging straight into stock."
     - "Always plan the job in this order: holes for screws, interior pockets, interior holes, outer boundaries."
     - "Use feedrates associated with the tools unless specified otherwise."
     - "Use climb cutting for finishing passes and conventional cutting for roughing passes unless material or tool advice says otherwise."

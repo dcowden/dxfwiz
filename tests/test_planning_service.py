@@ -129,7 +129,37 @@ def test_ai_plan_missing_contour_finishing_settings_is_repaired(tmp_path):
     assert contour_operations
     assert all(operation.finishing.enabled for operation in contour_operations)
     assert all(operation.roughing.side_allowance == 0.01 for operation in contour_operations)
+    assert all(operation.ramping for operation in contour_operations)
     assert "contours" in {group.name for group in job.operation_groups}
+
+
+def test_local_planner_ramps_outer_contours(tmp_path):
+    request = _planning_request(
+        tmp_path,
+        inputs={
+            "stock_xy": "9.500 x 48.000 in frame",
+            "stock_units": "in",
+            "stock_thickness": 0.25,
+            "stock_material": "plywood",
+            "z_zero_position": "stock_top",
+            "coordinate_system": "G55",
+            "workholding_method": ["screws"],
+            "cut_deeper_than_stock": 0.01,
+            "finishing_allowance": 0.01,
+        },
+    )
+
+    response = generate_operation_plan(request, client=FakePlannerClient())
+
+    assert response.errors == []
+    job = JobFile.model_validate(response.plan)
+    outer_contours = [
+        operation
+        for operation in job.operations
+        if operation.type == "contour" and operation.offset == "outside"
+    ]
+    assert outer_contours
+    assert all(operation.ramping for operation in outer_contours)
 
 
 def test_local_planner_selects_largest_single_tool_when_no_tool_is_specified(tmp_path):

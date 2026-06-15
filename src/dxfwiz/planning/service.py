@@ -228,6 +228,7 @@ def _normalize_operation_fields(
         operation.setdefault("offset", "outside")
         if operation["offset"] == "none":
             operation["offset"] = "on"
+        operation["ramping"] = True
         operation.setdefault("extra_depth", 0.0)
         operation["roughing"] = {
             **operation.get("roughing", {}),
@@ -810,6 +811,7 @@ def _contour_operation(
         "description": f"Outer contour for part {entity_id}",
         "entity": entity_id,
         "offset": "outside",
+        "ramping": True,
         "tool": tool_id,
         "depth": depth,
         "extra_depth": _cut_deeper_than_stock(request),

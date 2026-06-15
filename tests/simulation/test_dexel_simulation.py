@@ -256,6 +256,21 @@ def test_overlapping_pocket_style_paths_track_recut_cells_and_air_moves():
     assert run.response.metrics.removed_cells > 0
 
 
+def test_recut_does_not_count_extra_passes_below_stock_thickness():
+    moves = [
+        {"type": "rapid", "x": 0.3, "y": 1.0, "z": 0.25},
+        {"type": "line", "z": -0.3, "feed": 10},
+        {"type": "line", "x": 1.7, "y": 1.0, "z": -0.3, "feed": 40},
+        {"type": "line", "x": 0.3, "y": 1.0, "z": -0.3, "feed": 40},
+    ]
+
+    run = simulate_toolpath(_request([_pass("op-through-stock", moves)]))
+
+    assert run.response.metrics.max_actual_depth == pytest.approx(0.25)
+    assert run.response.metrics.recut_cells == 0
+    assert run.response.metrics.max_cut_count == 1
+
+
 def test_excessive_recut_warns_when_same_area_is_cut_more_than_twice():
     repeated_moves = [
         {"type": "rapid", "x": 0.3, "y": 1.0, "z": 0.25},
