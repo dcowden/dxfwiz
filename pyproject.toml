@@ -27,6 +27,10 @@ dev = [
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+addopts = "-m 'not integration'"
+markers = [
+    "integration: slow real-DXF and CAMotics integration tests",
+]
 
 [tool.ruff]
 line-length = 100

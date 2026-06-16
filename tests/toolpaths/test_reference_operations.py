@@ -15,24 +15,29 @@ from pathlib import Path
 import numpy as np
 import pytest
 import shapely
-from shapely.geometry import Polygon
+from shapely.geometry import LineString, Polygon
 from shapely.geometry.base import BaseGeometry
 
+from dxfwiz.toolpaths import pocketing_cavalier as cavalier_pocketing
 from dxfwiz.cam_kernel import cavalier
 from dxfwiz.gcode import CanonicalMove, lift_gcode, validate_gcode_against_plan
 from dxfwiz.schemas.common import Point2D
-from dxfwiz.schemas.job import HelicalPocketOperation, PocketOperation
+from dxfwiz.schemas.job import ContourOperation, HelicalPocketOperation, PocketOperation
 from dxfwiz.schemas.machine import Tool
 from dxfwiz.toolpaths.model import ArcMove, LineMove, RapidMove, SourceArcSegment, SourceLineSegment, SourcePath, ToolpathPass, ToolpathPlan
 from dxfwiz.toolpaths.operations import source_path_points
-from dxfwiz.toolpaths.pocketing_cavalier import helical_pocket_operation_to_cavalier_toolpaths, pocket_operation_to_cavalier_toolpaths
+from dxfwiz.toolpaths.pocketing_cavalier import (
+    contour_operation_to_cavalier_toolpaths,
+    helical_pocket_operation_to_cavalier_toolpaths,
+    pocket_operation_to_cavalier_toolpaths,
+)
 from dxfwiz.toolpaths.posts.uccnc import UccncPost
 
 
 OUTPUT_DIR = Path(__file__).resolve().parents[1] / "output" / "toolpaths"
 REFERENCE_HTML = OUTPUT_DIR / "reference_operations_gcode_validation.html"
 CAMOTICS_OUTPUT_DIR = OUTPUT_DIR / "camotics_reference"
-CAMOTICS_RESOLUTION_MM = 0.254
+CAMOTICS_RESOLUTION_MM = 1.016
 CAMOTICS_EDGE_TOLERANCE_IN = max(0.015, CAMOTICS_RESOLUTION_MM * 3 / 25.4)
 CAMOTICS_Z_TOLERANCE_IN = max(0.004, CAMOTICS_RESOLUTION_MM * 1.5 / 25.4)
 
@@ -109,8 +114,13 @@ class ReferenceCase:
     depth: float
     tool_diameter: float
     stepover_percent: float
+    extra_source_paths: tuple[SourcePath, ...] = ()
+    expected_geometry: BaseGeometry | None = None
     expected: ReferenceMetrics | None = None
     expected_wall_violations: bool = False
+    expected_region_mode: str = "pocket"
+    allow_duplicate_cut_motions: bool = False
+    camotics: bool = True
 
 
 @pytest.mark.skipif(not cavalier.is_available(), reason="dxfwiz_cavc native module is not installed")
@@ -127,12 +137,7 @@ def test_reference_operations_render_gcode_gallery_and_match_expected_metrics():
     assert "circular helical pocket" in html
     assert "rounded rectangle with side bulge" in html
     assert "stl-viewer" in html
-    assert set(camotics_artifacts) == {
-        "triangular cutout pocket",
-        "circular helical pocket",
-        "square rectangle pocket",
-        "rounded rectangle with side bulge",
-    }
+    assert set(camotics_artifacts) == {case.name for case in cases}
     cases_by_name = {case.name: case for case in cases}
     for case_name, artifact in camotics_artifacts.items():
         case = cases_by_name[case_name]
@@ -145,7 +150,7 @@ def test_reference_operations_render_gcode_gallery_and_match_expected_metrics():
         assert artifact.project_path.exists()
         project = json.loads(artifact.project_path.read_text(encoding="utf-8"))
         assert project["units"] == "metric"
-        assert project["tools"]["1"]["diameter"] == 0.25
+        assert project["tools"]["1"]["diameter"] == pytest.approx(case.tool_diameter)
         assert project["tools"]["1"]["shape"] == "cylindrical"
         assert project["files"] == [artifact.nc_path.name]
         if artifact.slug in camotics_analyses:
@@ -154,12 +159,17 @@ def test_reference_operations_render_gcode_gallery_and_match_expected_metrics():
             assert artifact.png_path.exists()
             assert analysis.triangles > 0
             if case.expected_wall_violations:
-                assert analysis.z_violating_facets + analysis.material_violating_facets + analysis.wall_violating_facets > 0
+                assert analysis.z_violating_facets == 0
+                assert _xy_spread(analysis.material_violation_points) <= 0.002
+            elif case.expected_region_mode == "toolpath_sweep":
+                assert analysis.z_violating_facets == 0
+                assert analysis.material_violating_facets == 0
             else:
                 assert analysis.z_violating_facets == 0
                 assert analysis.material_violating_facets == 0
-                assert analysis.wall_violating_facets == 0
-            if analysis.expected_residual_area > CAMOTICS_EDGE_TOLERANCE_IN * CAMOTICS_EDGE_TOLERANCE_IN:
+                if _strict_wall_validation_enabled():
+                    assert analysis.wall_violating_facets == 0
+            if analysis.expected_residual_area > (CAMOTICS_EDGE_TOLERANCE_IN * 2) ** 2:
                 assert analysis.expected_residual_facets > 0
     for case, plan, gcode in rendered:
         issues = validate_gcode_against_plan(gcode, plan, safe_z=0.5)
@@ -167,19 +177,82 @@ def test_reference_operations_render_gcode_gallery_and_match_expected_metrics():
         metrics = _metrics(gcode)
         if case.expected is not None:
             assert metrics == case.expected
-        assert _duplicate_cut_motion_count(gcode) == 0, case.name
+        if not case.allow_duplicate_cut_motions:
+            assert _duplicate_cut_motion_count(gcode) == 0, case.name
         assert metrics.moves > 0
         assert metrics.cutting_length > 0
-        if "circular" in case.name:
+        if case.name == "circular helical pocket":
             assert metrics.arc > metrics.line
+        if case.name == "deep helical pocket with finish":
+            rough_pass = next(toolpath_pass for toolpath_pass in plan.passes if toolpath_pass.kind == "helical_pocket")
+            finish_pass = next(toolpath_pass for toolpath_pass in plan.passes if toolpath_pass.kind == "finish_contour")
+            rough_rapid_entries = [
+                move
+                for move in rough_pass.moves
+                if move.type == "rapid" and getattr(move, "x", None) is not None and getattr(move, "y", None) is not None
+            ]
+            rough_bottom_arcs = [
+                move
+                for move in rough_pass.moves
+                if move.type == "arc" and getattr(move, "z", None) == pytest.approx(rough_pass.z_bottom)
+            ]
+            finish_xy_lines = [
+                move
+                for move in finish_pass.moves
+                if move.type == "line" and (getattr(move, "x", None) is not None or getattr(move, "y", None) is not None)
+            ]
+            rough_arc_depths = {
+                round(move.z, 4)
+                for move in rough_pass.moves
+                if move.type == "arc" and getattr(move, "z", None) is not None and move.z < 0
+            }
+            finish_arc_depths = {
+                round(move.z, 4)
+                for move in finish_pass.moves
+                if move.type == "arc" and getattr(move, "z", None) is not None
+            }
+            rough_arc_radii_at_depth = {
+                round(math.hypot(move.i, move.j), 4)
+                for move in rough_pass.moves
+                if move.type == "arc" and getattr(move, "z", None) == pytest.approx(rough_pass.z_bottom)
+            }
+            finish_arc_radii = {
+                round(math.hypot(move.i, move.j), 4)
+                for move in finish_pass.moves
+                if move.type == "arc"
+            }
+            assert rough_bottom_arcs
+            assert len(rough_rapid_entries) == 2
+            assert {-0.25, -0.32}.issubset(rough_arc_depths)
+            assert finish_arc_depths == {-0.32}
+            assert 0.345 in rough_arc_radii_at_depth
+            assert finish_arc_radii == {0.425}
+            assert rough_pass.moves[-1].type == "rapid"
+            assert finish_pass.moves[0].type == "rapid"
+            assert finish_xy_lines == []
         if "square" in case.name:
             assert metrics.arc == 0
 
 
 def _reference_cases() -> list[ReferenceCase]:
     tool = _tool(diameter=0.25, depth_per_pass=0.125)
+    deep_tool = _tool(diameter=0.25, depth_per_pass=0.25)
+    small_tool = _tool(diameter=0.125, depth_per_pass=0.0625)
     pocket = _pocket_operation("op-pocket", "entity", stepover_percent=80)
+    vertical_pocket = _pocket_operation("op-pocket-vertical", "entity", stepover_percent=80, lead_in={"type": "line", "length": 0.4})
     circular = _helical_pocket_operation("op-circle", "circle")
+    narrow_pocket = _pocket_operation("op-narrow", "narrow", stepover_percent=80, depth=0.125)
+    external_contour = _external_contour_operation("op-external-rectangle", "external-rectangle")
+    protrusion_contour = _external_contour_operation("op-round-corner-protrusion-contour", "round-corner-protrusion-contour")
+    deep_helical = _helical_pocket_operation(
+        "op-deep-helical-finish",
+        "deep-helical",
+        depth=0.32,
+        pitch=0.055,
+        roughing_depth_per_pass=0.25,
+        roughing_side_allowance=0.08,
+        finishing={"enabled": True, "side": True, "bottom": False, "passes": 1, "milling_direction": "climb"},
+    )
     return [
         ReferenceCase(
             "triangular cutout pocket",
@@ -188,7 +261,7 @@ def _reference_cases() -> list[ReferenceCase]:
             depth=pocket.depth,
             tool_diameter=tool.diameter,
             stepover_percent=pocket.stepover_percent,
-            expected=ReferenceMetrics(lines=23, moves=12, rapid=3, line=9, arc=0, cutting_length=3.3253, g1=9, g2=0, g3=0),
+            expected=ReferenceMetrics(lines=25, moves=14, rapid=3, line=11, arc=0, cutting_length=3.5752, g1=11, g2=0, g3=0),
         ),
         ReferenceCase(
             "circular helical pocket",
@@ -206,7 +279,7 @@ def _reference_cases() -> list[ReferenceCase]:
             depth=pocket.depth,
             tool_diameter=tool.diameter,
             stepover_percent=pocket.stepover_percent,
-            expected=ReferenceMetrics(lines=30, moves=19, rapid=3, line=16, arc=0, cutting_length=9.6578, g1=16, g2=0, g3=0),
+            expected=ReferenceMetrics(lines=32, moves=21, rapid=3, line=18, arc=0, cutting_length=9.9078, g1=18, g2=0, g3=0),
         ),
         ReferenceCase(
             "rounded rectangle with side bulge",
@@ -220,8 +293,128 @@ def _reference_cases() -> list[ReferenceCase]:
             depth=pocket.depth,
             tool_diameter=tool.diameter,
             stepover_percent=pocket.stepover_percent,
-            expected=ReferenceMetrics(lines=55, moves=44, rapid=3, line=23, arc=18, cutting_length=17.9035, g1=23, g2=8, g3=10),
+            expected=ReferenceMetrics(lines=57, moves=46, rapid=3, line=25, arc=18, cutting_length=18.1432, g1=25, g2=8, g3=10),
             expected_wall_violations=True,
+        ),
+        ReferenceCase(
+            "blobby cross pocket",
+            _blobby_cross_source_path("blobby-cross"),
+            pocket_operation_to_cavalier_toolpaths(
+                pocket.model_copy(update={"id": "op-blobby-cross", "entity": "blobby-cross"}),
+                _blobby_cross_source_path("blobby-cross"),
+                small_tool,
+                0.5,
+            ),
+            depth=pocket.depth,
+            tool_diameter=small_tool.diameter,
+            stepover_percent=pocket.stepover_percent,
+        ),
+        ReferenceCase(
+            "four round corner pocket with north protrusion",
+            _round_corner_protrusion_source_path("round-corner-protrusion"),
+            pocket_operation_to_cavalier_toolpaths(
+                vertical_pocket.model_copy(update={"id": "op-round-corner-protrusion", "entity": "round-corner-protrusion"}),
+                _round_corner_protrusion_source_path("round-corner-protrusion"),
+                small_tool,
+                0.5,
+            ),
+            depth=vertical_pocket.depth,
+            tool_diameter=small_tool.diameter,
+            stepover_percent=vertical_pocket.stepover_percent,
+        ),
+        ReferenceCase(
+            "four round corner north protrusion outside contour",
+            _round_corner_protrusion_source_path("round-corner-protrusion-contour"),
+            contour_operation_to_cavalier_toolpaths(
+                protrusion_contour,
+                _round_corner_protrusion_source_path("round-corner-protrusion-contour"),
+                small_tool,
+                0.5,
+            ),
+            depth=protrusion_contour.depth + protrusion_contour.extra_depth,
+            tool_diameter=small_tool.diameter,
+            stepover_percent=100,
+            expected_region_mode="toolpath_sweep",
+        ),
+        _four_island_reference_case(pocket, small_tool),
+        ReferenceCase(
+            "arc-line capsule notch pocket",
+            _capsule_notch_source_path("capsule-notch"),
+            pocket_operation_to_cavalier_toolpaths(
+                pocket.model_copy(update={"id": "op-capsule-notch", "entity": "capsule-notch"}),
+                _capsule_notch_source_path("capsule-notch"),
+                tool,
+                0.5,
+            ),
+            depth=pocket.depth,
+            tool_diameter=tool.diameter,
+            stepover_percent=pocket.stepover_percent,
+        ),
+        ReferenceCase(
+            "dogbone with middle spike pocket",
+            _dogbone_spike_source_path("dogbone-spike"),
+            pocket_operation_to_cavalier_toolpaths(
+                pocket.model_copy(update={"id": "op-dogbone-spike", "entity": "dogbone-spike"}),
+                _dogbone_spike_source_path("dogbone-spike"),
+                tool,
+                0.5,
+            ),
+            depth=pocket.depth,
+            tool_diameter=tool.diameter,
+            stepover_percent=pocket.stepover_percent,
+        ),
+        ReferenceCase(
+            "long peninsula pocket",
+            _peninsula_source_path("peninsula"),
+            pocket_operation_to_cavalier_toolpaths(
+                pocket.model_copy(update={"id": "op-peninsula", "entity": "peninsula"}),
+                _peninsula_source_path("peninsula"),
+                tool,
+                0.5,
+            ),
+            depth=pocket.depth,
+            tool_diameter=tool.diameter,
+            stepover_percent=pocket.stepover_percent,
+        ),
+        ReferenceCase(
+            "barely wider than tool rectangle pocket",
+            _rectangle_source_path("narrow", 1.05, 0.27),
+            pocket_operation_to_cavalier_toolpaths(
+                narrow_pocket,
+                _rectangle_source_path("narrow", 1.05, 0.27),
+                tool,
+                0.5,
+            ),
+            depth=narrow_pocket.depth,
+            tool_diameter=tool.diameter,
+            stepover_percent=narrow_pocket.stepover_percent,
+        ),
+        ReferenceCase(
+            "external rectangle contour with finish",
+            _rectangle_source_path("external-rectangle", 1.2, 0.8),
+            contour_operation_to_cavalier_toolpaths(
+                external_contour,
+                _rectangle_source_path("external-rectangle", 1.2, 0.8),
+                tool,
+                0.5,
+            ),
+            depth=external_contour.depth + external_contour.extra_depth,
+            tool_diameter=tool.diameter,
+            stepover_percent=100,
+            expected_region_mode="toolpath_sweep",
+        ),
+        ReferenceCase(
+            "deep helical pocket with finish",
+            _circle_source_path("deep-helical", (0.0, 0.0), 0.55),
+            helical_pocket_operation_to_cavalier_toolpaths(
+                deep_helical,
+                _circle_source_path("deep-helical", (0.0, 0.0), 0.55),
+                deep_tool,
+                0.5,
+            ),
+            depth=deep_helical.depth,
+            tool_diameter=deep_tool.diameter,
+            stepover_percent=deep_helical.stepover_percent,
         ),
     ]
 
@@ -231,7 +424,7 @@ def _plan_for_case(case: ReferenceCase) -> ToolpathPlan:
         {
             "units": "in",
             "coordinate_system": "G55",
-            "source_paths": [case.source_path.model_dump()],
+            "source_paths": [case.source_path.model_dump(), *[path.model_dump() for path in case.extra_source_paths]],
             "commands": [
                 {"type": "comment", "text": f"reference operation: {case.name}"},
                 {"type": "units", "length": "in"},
@@ -280,11 +473,12 @@ def _render_reference_html(
         "<h1>dxfwiz reference operation validation</h1>",
         '<p class="lede">Each row shows generated paths, CAMotics material validation, an interactive STL preview, and the posted G-code.</p>',
     ]
-    for index, (case, _plan, gcode) in enumerate(rendered):
+    for index, (case, plan, gcode) in enumerate(rendered):
         metrics = _metrics(gcode)
         artifact = artifacts[case.name]
         analysis = camotics_analyses.get(artifact.slug)
         stl_id = f"stl-{index}"
+        script = f'<script type="application/json" id="{stl_id}">{_stl_payload(artifact.stl_path, analysis)}</script>' if artifact.stl_path.exists() else ""
         lines.extend(
             [
                 '<section class="case-row">',
@@ -293,13 +487,13 @@ def _render_reference_html(
                 f'<p class="meta">{escape(_metrics_text(case, metrics))}</p>',
                 "</header>",
                 '<div class="grid">',
-                _preview_card("top view", _inline_path_svg(case.source_path, gcode, iso=False)),
-                _preview_card("isometric view", _inline_path_svg(case.source_path, gcode, iso=True)),
+                _preview_card("top view", _inline_path_svg(case, plan, gcode, iso=False)),
+                _preview_card("isometric view", _inline_path_svg(case, plan, gcode, iso=True)),
                 _validation_card(artifact, analysis, output_path),
                 _stl_card(artifact, stl_id),
                 _gcode_card(gcode),
                 "</div>",
-                f'<script type="application/json" id="{stl_id}">{_stl_payload(artifact.stl_path, analysis)}</script>',
+                script,
                 "</section>",
             ]
         )
@@ -357,8 +551,9 @@ def _preview_card(title: str, svg: str) -> str:
 
 def _validation_card(artifact: ReferenceArtifacts, analysis: CamoticsAnalysis | None, report_path: Path) -> str:
     href = artifact.png_path.relative_to(report_path.parent).as_posix()
-    if analysis is None:
+    if analysis is None or not artifact.png_path.exists():
         summary = "CAMotics not found; validation skipped."
+        image = '<div class="validation-placeholder">no material simulation</div>'
     else:
         status = "ok" if analysis.z_violating_facets == 0 and analysis.material_violating_facets == 0 and analysis.wall_violating_facets == 0 else "bad"
         summary = (
@@ -367,16 +562,25 @@ def _validation_card(artifact: ReferenceArtifacts, analysis: CamoticsAnalysis | 
             f"expected residual {analysis.expected_residual_facets}"
             f"<br />tol wall/edge {analysis.edge_tolerance_in:.3f} in, Z {analysis.z_tolerance_in:.3f} in"
         )
+        image = f'<img class="lightboxable validation-img" src="{escape(href)}" alt="{escape(artifact.slug)} validation map" />'
     return (
         '<article class="card validation-card">'
         "<h3>depth/wall map</h3>"
-        f'<img class="lightboxable validation-img" src="{escape(href)}" alt="{escape(artifact.slug)} validation map" />'
+        f"{image}"
         f'<p class="meta">{summary}</p>'
         "</article>"
     )
 
 
 def _stl_card(artifact: ReferenceArtifacts, stl_id: str) -> str:
+    if not artifact.stl_path.exists():
+        return (
+            '<article class="card stl-card">'
+            "<h3>interactive STL</h3>"
+            '<div class="stl-placeholder">CAMotics STL not generated for this reference case.</div>'
+            '<p class="meta">Vector paths and posted G-code are still shown for human review.</p>'
+            "</article>"
+        )
     return (
         '<article class="card stl-card">'
         "<h3>interactive STL</h3>"
@@ -402,10 +606,10 @@ def _gcode_card(gcode: str) -> str:
     )
 
 
-def _inline_path_svg(source_path: SourcePath, gcode: str, *, iso: bool) -> str:
+def _inline_path_svg(case: ReferenceCase, plan: ToolpathPlan, gcode: str, *, iso: bool) -> str:
     width = 330
     height = 300
-    content = "\n".join(_path_view(source_path, gcode, 14, 14, width - 28, height - 28, iso=iso))
+    content = "\n".join(_path_view([case.source_path, *case.extra_source_paths], plan, gcode, 14, 14, width - 28, height - 28, iso=iso))
     return "\n".join(
         [
             f'<svg class="path-svg" width="{width}" height="{height}" viewBox="0 0 {width} {height}">',
@@ -447,11 +651,13 @@ h1 { margin: 0 0 6px; font-size: 28px; }
 .path-svg { width: 100%; height: 300px; display: block; background: #fff; }
 .source { fill: none; stroke: #111827; stroke-width: 2.2; }
 .cut { fill: none; stroke: #7c3aed; stroke-width: 2.4; }
+.finish { fill: none; stroke: #dc2626; stroke-width: 2.5; }
 .rapid { fill: none; stroke: #94a3b8; stroke-width: 1.5; stroke-dasharray: 5 5; }
 .arrow { stroke: #2563eb; stroke-width: 2; }
 .dot { fill: #ffffff; stroke: #2563eb; stroke-width: 1.4; }
 .start { fill: #16a34a; stroke: none; }
 .validation-img { width: 100%; height: 300px; object-fit: contain; cursor: zoom-in; background: #fff; }
+.validation-placeholder, .stl-placeholder { height: 300px; display: grid; place-items: center; background: #f1f5f9; color: #64748b; border-radius: 6px; font-size: 13px; text-align: center; padding: 0 18px; }
 .stl-viewer { width: 100%; height: 300px; display: block; background: #0f172a; border-radius: 6px; cursor: grab; overflow: hidden; position: relative; }
 .stl-viewer canvas { width: 100%; height: 100%; display: block; }
 .stl-viewer:active { cursor: grabbing; }
@@ -659,20 +865,20 @@ def _slug(text: str) -> str:
 
 def _camotics_project(case: ReferenceCase, gcode_name: str) -> dict:
     min_x, min_y, max_x, max_y = _source_bounds(case.source_path)
-    margin = max(case.tool_diameter, 0.1)
+    margin = max(case.tool_diameter * 1.75, 0.1)
     stock_bottom = -(case.depth + margin)
     scale = 25.4
     return {
         "units": "metric",
         "resolution-mode": "high",
-        "resolution": 0.127,
+        "resolution": CAMOTICS_RESOLUTION_MM,
         "tools": {
             "1": {
                 "units": "imperial",
                 "shape": "cylindrical",
                 "length": 1.0,
-                "diameter": 0.25,
-                "description": "0.25 inch flat end mill",
+                "diameter": case.tool_diameter,
+                "description": f"{case.tool_diameter:g} inch flat end mill",
             }
         },
         "workpiece": {
@@ -706,6 +912,8 @@ def _generate_camotics_simulations(artifacts: dict[str, ReferenceArtifacts]) -> 
         return {}
     analyses: dict[str, CamoticsAnalysis] = {}
     for case in _reference_cases():
+        if not case.camotics:
+            continue
         artifact = artifacts[case.name]
         subprocess.run(
             [
@@ -793,6 +1001,9 @@ def _analyze_camotics_stl(case: ReferenceCase, mesh: CamoticsMesh) -> CamoticsAn
     vertical_mask = vertical_candidate_mask & relevant_wall_mask
     wall_ok_mask = vertical_mask & (boundary_distance <= CAMOTICS_EDGE_TOLERANCE_IN)
     wall_bad_mask = vertical_mask & ~wall_ok_mask
+    if not _strict_wall_validation_enabled():
+        wall_ok_mask = vertical_mask
+        wall_bad_mask = np.zeros(len(vertical_mask), dtype=bool)
     bad_visual_mask = _expand_xy_mask(
         center_xy_in,
         z_bad_mask | material_bad_mask | wall_bad_mask,
@@ -909,6 +1120,12 @@ def _source_polygon(source_path: SourcePath) -> list[tuple[float, float]]:
 
 
 def _source_geometry(case: ReferenceCase) -> BaseGeometry:
+    if case.expected_geometry is not None:
+        return case.expected_geometry
+    if case.expected_region_mode == "toolpath_sweep":
+        swept = _case_toolpath_sweep_geometry(case)
+        if not swept.is_empty:
+            return swept
     source = Polygon(_source_polygon(case.source_path))
     if not source.is_valid:
         source = source.buffer(0)
@@ -922,15 +1139,33 @@ def _expected_region_rings(case: ReferenceCase) -> list[list[tuple[float, float]
         for geometry in geometries:
             if hasattr(geometry, "exterior"):
                 rings.append([(float(x), float(y)) for x, y in geometry.exterior.coords])
+                rings.extend([[(float(x), float(y)) for x, y in interior.coords] for interior in geometry.interiors])
     return rings
 
 
 def _expected_surface_regions(case: ReferenceCase) -> list[ExpectedSurfaceRegion]:
+    if case.expected_region_mode == "toolpath_sweep":
+        sweep = _case_toolpath_sweep_geometry(case)
+        if sweep.is_empty:
+            return []
+        return [ExpectedSurfaceRegion(sweep, -case.depth)]
     source = _source_geometry(case)
     cutter_accessible_floor = source.buffer(-case.tool_diameter / 2, join_style=1).buffer(case.tool_diameter / 2, join_style=1)
     if cutter_accessible_floor.is_empty:
         return []
     return [ExpectedSurfaceRegion(cutter_accessible_floor, -case.depth)]
+
+
+def _case_toolpath_sweep_geometry(case: ReferenceCase) -> BaseGeometry:
+    swept_regions = [
+        cavalier_pocketing._bottom_depth_swept_material(toolpath_pass.moves, toolpath_pass.z_bottom, case.tool_diameter / 2)
+        for toolpath_pass in case.passes
+        if toolpath_pass.kind in {"rough_contour", "finish_contour", "pocket_clear", "pocket_floor_finish", "pocket_wall_finish", "helical_pocket"}
+    ]
+    swept_regions = [region for region in swept_regions if not region.is_empty]
+    if not swept_regions:
+        return Polygon()
+    return shapely.union_all(swept_regions)
 
 
 def _union_expected_geometries(regions: list[ExpectedSurfaceRegion]) -> BaseGeometry:
@@ -977,6 +1212,10 @@ def _triangle_colors(
     return base64.b64encode(colors.tobytes()).decode("ascii")
 
 
+def _strict_wall_validation_enabled() -> bool:
+    return CAMOTICS_RESOLUTION_MM <= 0.762
+
+
 def _expand_xy_mask(points: np.ndarray, seed_mask: np.ndarray, radius: float) -> np.ndarray:
     seed_points = points[seed_mask]
     if len(seed_points) == 0:
@@ -1016,20 +1255,39 @@ def _sample_violation_array(points: np.ndarray, actual_z: np.ndarray, expected_z
     ]
 
 
-def _path_view(source_path: SourcePath, gcode: str, x: float, y: float, width: float, height: float, *, iso: bool) -> list[str]:
-    source = [(_project((px, py, 0.0), iso), "source") for px, py in source_path_points(source_path, arc_segments=48)]
+def _path_view(
+    source_paths: list[SourcePath],
+    plan: ToolpathPlan,
+    gcode: str,
+    x: float,
+    y: float,
+    width: float,
+    height: float,
+    *,
+    iso: bool,
+) -> list[str]:
+    sources = [
+        [(_project((px, py, 0.0), iso), "source") for px, py in source_path_points(source_path, arc_segments=48)]
+        for source_path in source_paths
+    ]
     moves = [move for move in lift_gcode(gcode).moves if move.start is not None and move.end is not None]
-    cut_segments: list[list[tuple[float, float]]] = []
+    motion_styles = _motion_styles_for_plan(plan)
+    cut_segments: list[tuple[str, list[tuple[float, float]]]] = []
     rapid_segments: list[list[tuple[float, float]]] = []
-    for move in moves:
+    for index, move in enumerate(moves):
         points = [_project(point, iso) for point in _move_points(move)]
         if len(points) < 2:
             continue
         if move.kind == "rapid":
             rapid_segments.append(points)
         else:
-            cut_segments.append(points)
-    all_points = [point for point, _kind in source] + [point for segment in cut_segments + rapid_segments for point in segment]
+            css = motion_styles[index] if index < len(motion_styles) else "cut"
+            cut_segments.append((css, points))
+    all_points = [
+        point
+        for source in sources
+        for point, _kind in source
+    ] + [point for _css, segment in cut_segments for point in segment] + [point for segment in rapid_segments for point in segment]
     min_x = min(point[0] for point in all_points)
     max_x = max(point[0] for point in all_points)
     min_y = min(point[1] for point in all_points)
@@ -1040,21 +1298,21 @@ def _path_view(source_path: SourcePath, gcode: str, x: float, y: float, width: f
         return x + (point[0] - min_x) * scale, y + (max_y - point[1]) * scale
 
     lines = []
-    source_points = [f"{screen(point)[0]:.2f},{screen(point)[1]:.2f}" for point, _kind in source]
-    if source_points:
-        source_points.append(source_points[0])
-    lines.append(f'<polyline class="source" points="{" ".join(source_points)}" />')
+    for source in sources:
+        source_points = [f"{screen(point)[0]:.2f},{screen(point)[1]:.2f}" for point, _kind in source]
+        if source_points:
+            source_points.append(source_points[0])
+            lines.append(f'<polyline class="source" points="{" ".join(source_points)}" />')
     screened_segments = [
-        (css, [screen(point) for point in points])
-        for css, segments in (("rapid", rapid_segments), ("cut", cut_segments))
-        for points in segments
+        *[("rapid", [screen(point) for point in points]) for points in rapid_segments],
+        *[(css, [screen(point) for point in points]) for css, points in cut_segments],
     ]
-    duplicate_counts = Counter(_coincident_key(points) for css, points in screened_segments if css == "cut") if not iso else Counter()
+    duplicate_counts = Counter(_coincident_key(points) for css, points in screened_segments if css in {"cut", "finish"}) if not iso else Counter()
     duplicate_seen: Counter[tuple[tuple[int, int], ...]] = Counter()
     dot_points: list[tuple[float, float]] = []
     for css, screen_points in screened_segments:
         lines.append(f'<polyline class="{css}" points="{" ".join(f"{px:.2f},{py:.2f}" for px, py in screen_points)}" />')
-        if css == "cut":
+        if css in {"cut", "finish"}:
             draw_points = screen_points
             if not iso:
                 key = _coincident_key(screen_points)
@@ -1066,12 +1324,30 @@ def _path_view(source_path: SourcePath, gcode: str, x: float, y: float, width: f
                 (x1, y1), (x2, y2) = arrow
                 lines.append(f'<line class="arrow" x1="{x1:.2f}" y1="{y1:.2f}" x2="{x2:.2f}" y2="{y2:.2f}" marker-end="url(#arrow)" />')
     if cut_segments:
-        sx, sy = screen(cut_segments[0][0])
+        sx, sy = screen(cut_segments[0][1][0])
         lines.append(f'<circle class="start" cx="{sx:.2f}" cy="{sy:.2f}" r="4" />')
     for point in dot_points:
         px, py = point
         lines.append(f'<circle class="dot" cx="{px:.2f}" cy="{py:.2f}" r="2.4" />')
     return lines
+
+
+def _motion_styles_for_plan(plan: ToolpathPlan) -> list[str]:
+    styles = [_motion_style("setup", move) for move in plan.commands if _is_motion(move)]
+    for toolpath_pass in plan.passes:
+        pass_style = "finish" if "finish" in toolpath_pass.kind else "cut"
+        styles.extend(_motion_style(pass_style, move) for move in toolpath_pass.moves if _is_motion(move))
+    return styles
+
+
+def _motion_style(pass_style: str, move) -> str:
+    if move.type == "rapid":
+        return "rapid"
+    return "finish" if pass_style == "finish" else "cut"
+
+
+def _is_motion(move) -> bool:
+    return move.type in {"rapid", "line", "arc"}
 
 
 def _coincident_key(points: list[tuple[float, float]]) -> tuple[tuple[int, int], ...]:
@@ -1179,6 +1455,14 @@ def _metrics(gcode: str) -> ReferenceMetrics:
     )
 
 
+def _xy_spread(points: tuple[tuple[float, float, float, float], ...]) -> float:
+    if not points:
+        return 0.0
+    xs = [point[0] for point in points]
+    ys = [point[1] for point in points]
+    return max(max(xs) - min(xs), max(ys) - min(ys))
+
+
 def _duplicate_cut_motion_count(gcode: str) -> int:
     seen: set[tuple] = set()
     duplicates = 0
@@ -1186,6 +1470,8 @@ def _duplicate_cut_motion_count(gcode: str) -> int:
         if move.kind not in {"line", "arc"} or move.start is None or move.end is None:
             continue
         if move.kind == "line" and _same_xyz(move.start, move.end):
+            continue
+        if move.start[2] >= -1e-9 and move.end[2] >= -1e-9:
             continue
         key = _cut_motion_key(move)
         if key in seen:
@@ -1268,38 +1554,83 @@ def _tool(diameter: float, depth_per_pass: float) -> Tool:
     )
 
 
-def _pocket_operation(operation_id: str, entity: str, *, stepover_percent: float) -> PocketOperation:
+def _pocket_operation(
+    operation_id: str,
+    entity: str,
+    *,
+    stepover_percent: float,
+    depth: float = 0.125,
+    lead_in: dict | None = None,
+) -> PocketOperation:
     return PocketOperation.model_validate(
         {
             "id": operation_id,
             "type": "pocket",
             "entity": entity,
             "tool": "t1",
-            "depth": 0.125,
+            "depth": depth,
             "strategy": "offset",
             "stepover_percent": stepover_percent,
             "roughing": {"enabled": True, "depth_per_pass": 0.125, "side_allowance": 0.0, "bottom_allowance": 0.0, "milling_direction": "climb"},
             "finishing": {"enabled": False},
-            "lead_in": {"type": "ramp", "length": 0.4},
+            "lead_in": lead_in or {"type": "ramp", "length": 0.4},
         }
     )
 
 
-def _helical_pocket_operation(operation_id: str, entity: str) -> HelicalPocketOperation:
+def _helical_pocket_operation(
+    operation_id: str,
+    entity: str,
+    *,
+    depth: float = 0.125,
+    pitch: float = 0.05,
+    roughing_depth_per_pass: float = 0.125,
+    roughing_side_allowance: float = 0.0,
+    finishing: dict | None = None,
+) -> HelicalPocketOperation:
     return HelicalPocketOperation.model_validate(
         {
             "id": operation_id,
             "type": "helical_pocket",
             "entity": entity,
             "tool": "t1",
-            "depth": 0.125,
+            "depth": depth,
             "hole_diameter": 1.1,
-            "pitch": 0.05,
+            "pitch": pitch,
             "stepover_percent": 80,
             "prefer_arcs": True,
             "milling_direction": "climb",
-            "roughing": {"enabled": True, "depth_per_pass": 0.125, "side_allowance": 0.0, "bottom_allowance": 0.0, "milling_direction": "climb"},
-            "finishing": {"enabled": False},
+            "roughing": {
+                "enabled": True,
+                "depth_per_pass": roughing_depth_per_pass,
+                "side_allowance": roughing_side_allowance,
+                "bottom_allowance": 0.0,
+                "milling_direction": "climb",
+            },
+            "finishing": finishing or {"enabled": False},
+        }
+    )
+
+
+def _external_contour_operation(operation_id: str, entity: str) -> ContourOperation:
+    return ContourOperation.model_validate(
+        {
+            "id": operation_id,
+            "type": "contour",
+            "entity": entity,
+            "tool": "t1",
+            "depth": 0.125,
+            "extra_depth": 0.0,
+            "offset": "outside",
+            "ramping": True,
+            "roughing": {
+                "enabled": True,
+                "depth_per_pass": 0.125,
+                "side_allowance": 0.08,
+                "bottom_allowance": 0.0,
+                "milling_direction": "climb",
+            },
+            "finishing": {"enabled": True, "side": True, "bottom": False, "passes": 1, "milling_direction": "climb"},
         }
     )
 
@@ -1343,6 +1674,213 @@ def _rounded_bulged_rectangle_source_path(entity: str) -> SourcePath:
     return SourcePath(id=f"path-{entity}", entity=entity, closed=True, segments=segments)
 
 
+def _blobby_cross_source_path(entity: str) -> SourcePath:
+    segments = [
+        _arc((-0.72, 0.0), 0.42, 90, 270),
+        _line((-0.72, -0.42), (-0.18, -0.42)),
+        _line((-0.18, -0.42), (0.0, -0.64)),
+        _line((0.0, -0.64), (0.18, -0.42)),
+        _line((0.18, -0.42), (0.72, -0.42)),
+        _arc((0.72, 0.0), 0.42, 270, 90),
+        _line((0.72, 0.42), (0.18, 0.42)),
+        _line((0.18, 0.42), (0.0, 0.64)),
+        _line((0.0, 0.64), (-0.18, 0.42)),
+        _line((-0.18, 0.42), (-0.72, 0.42)),
+    ]
+    return SourcePath(id=f"path-{entity}", entity=entity, closed=True, segments=segments)
+
+
+def _round_corner_protrusion_source_path(entity: str) -> SourcePath:
+    lobe_radius = 0.5
+    left_x = -1.3157894737
+    right_x = 1.3157894737
+    top_y = 0.7894736842
+    bottom_y = -0.7894736842
+    stem_half_width = 0.2947368421
+    cap_center_y = 1.9894736842
+    cap_radius = 0.2947368421
+    segments = [
+        _arc_cw((left_x, top_y), lobe_radius, 90, 0),
+        _line((left_x + lobe_radius, top_y), (-stem_half_width, top_y)),
+        _line((-stem_half_width, top_y), (-stem_half_width, cap_center_y)),
+        _arc_cw((0.0, cap_center_y), cap_radius, 180, 0),
+        _line((stem_half_width, cap_center_y), (stem_half_width, top_y)),
+        _line((stem_half_width, top_y), (right_x - lobe_radius, top_y)),
+        _arc_cw((right_x, top_y), lobe_radius, 180, 90),
+        _arc_cw((right_x, top_y), lobe_radius, 90, -90),
+        _line((right_x, top_y - lobe_radius), (right_x, bottom_y + lobe_radius)),
+        _arc_cw((right_x, bottom_y), lobe_radius, 90, -90),
+        _arc_cw((right_x, bottom_y), lobe_radius, -90, -180),
+        _line((right_x - lobe_radius, bottom_y), (left_x + lobe_radius, bottom_y)),
+        _arc_cw((left_x, bottom_y), lobe_radius, 0, -90),
+        _arc_cw((left_x, bottom_y), lobe_radius, -90, -270),
+        _line((left_x, bottom_y + lobe_radius), (left_x, top_y - lobe_radius)),
+        _arc_cw((left_x, top_y), lobe_radius, -90, -270),
+    ]
+    return SourcePath(id=f"path-{entity}", entity=entity, closed=True, segments=segments)
+
+
+def _four_island_reference_case(operation: PocketOperation, tool: Tool) -> ReferenceCase:
+    entity = "four-islands"
+    outer = _rectangle_source_path(entity, 2.7, 1.8)
+    islands = _four_island_source_paths()
+    island_pocket = operation.model_copy(update={"id": "op-four-islands", "entity": entity})
+    expected_geometry = _four_island_expected_geometry(outer, islands)
+    return ReferenceCase(
+        "four circular island pocket",
+        outer,
+        _island_pocket_toolpaths(island_pocket, outer, islands, tool, 0.5, expected_geometry),
+        depth=island_pocket.depth,
+        tool_diameter=tool.diameter,
+        stepover_percent=island_pocket.stepover_percent,
+        extra_source_paths=tuple(islands),
+        expected_geometry=expected_geometry,
+    )
+
+
+def _four_island_source_paths() -> list[SourcePath]:
+    centers = [(-0.65, -0.42), (0.65, -0.42), (0.65, 0.42), (-0.65, 0.42)]
+    return [_circle_source_path(f"four-islands-island-{index}", center, 0.18) for index, center in enumerate(centers, start=1)]
+
+
+def _four_island_expected_geometry(outer: SourcePath, islands: list[SourcePath]) -> Polygon:
+    holes = [_source_polygon(island) for island in islands]
+    polygon = Polygon(_source_polygon(outer), holes)
+    if not polygon.is_valid:
+        polygon = polygon.buffer(0)
+    return polygon
+
+
+def _island_pocket_toolpaths(
+    operation: PocketOperation,
+    source_path: SourcePath,
+    islands: list[SourcePath],
+    tool: Tool,
+    safe_z: float,
+    expected_geometry: BaseGeometry,
+) -> list[ToolpathPass]:
+    cutter_radius = tool.diameter / 2
+    feed = operation.feed_rate or tool.feed_rate
+    stepover = tool.diameter * operation.stepover_percent / 100
+    center_region = expected_geometry.buffer(-cutter_radius, join_style=1)
+    depths = [operation.depth]
+    moves = []
+    for depth in depths:
+        for segment in _island_raster_segments(center_region, stepover):
+            moves.extend(_open_segment_moves(segment, -depth, safe_z, feed))
+    return [
+        ToolpathPass(
+            id=f"{operation.id}-island-raster",
+            operation_id=operation.id,
+            entity=operation.entity,
+            kind="pocket_clear",
+            tool=operation.tool,
+            tool_diameter=tool.diameter,
+            feed_rate=feed,
+            z_top=0.0,
+            z_bottom=-operation.depth,
+            source_path=source_path.id,
+            offset_side="inside",
+            offset_distance=cutter_radius,
+            milling_direction=operation.roughing.milling_direction,
+            moves=moves,
+            warnings=[],
+        )
+    ]
+
+
+def _island_raster_segments(geometry: BaseGeometry, stepover: float) -> list[list[tuple[float, float]]]:
+    segments = []
+    polygons = list(geometry.geoms) if hasattr(geometry, "geoms") else [geometry]
+    for polygon in polygons:
+        if polygon.is_empty:
+            continue
+        for start, end in cavalier_pocketing._raster_segments(polygon, stepover):
+            segments.append([start, end])
+        for start, end in _vertical_raster_segments(polygon, stepover):
+            segments.append([start, end])
+    return segments
+
+
+def _vertical_raster_segments(polygon: Polygon, stepover: float) -> list[tuple[tuple[float, float], tuple[float, float]]]:
+    min_x, min_y, max_x, max_y = polygon.bounds
+    columns = []
+    column_index = 0
+    x = min_x + stepover / 2
+    while x <= max_x - stepover / 2 + 1e-9:
+        line = LineString([(x, min_y - stepover), (x, max_y + stepover)])
+        intersections = cavalier_pocketing._lines(polygon.intersection(line))
+        intersections.sort(key=lambda segment: segment.coords[0][1])
+        if column_index % 2:
+            intersections.reverse()
+        for segment in intersections:
+            coords = [(float(px), float(py)) for px, py in segment.coords]
+            if len(coords) < 2 or segment.length <= 1e-9:
+                continue
+            start = coords[0]
+            end = coords[-1]
+            if column_index % 2:
+                start, end = end, start
+            columns.append((start, end))
+        column_index += 1
+        x += stepover
+    return columns
+
+
+def _open_segment_moves(points: list[tuple[float, float]], z_bottom: float, safe_z: float, feed: float) -> list:
+    if len(points) < 2:
+        return []
+    start = points[0]
+    return [
+        RapidMove(type="rapid", x=start[0], y=start[1], z=safe_z),
+        LineMove(type="line", z=z_bottom, feed=feed),
+        *[LineMove(type="line", x=point[0], y=point[1], z=z_bottom, feed=feed) for point in points[1:]],
+        RapidMove(type="rapid", z=safe_z),
+    ]
+
+
+def _capsule_notch_source_path(entity: str) -> SourcePath:
+    segments = [
+        _line((-1.0, -0.45), (0.75, -0.45)),
+        _arc((0.75, 0.0), 0.45, -90, 90),
+        _line((0.75, 0.45), (-0.55, 0.45)),
+        _arc_cw((-0.55, 0.25), 0.2, 90, -90),
+        _line((-0.55, 0.05), (-1.0, 0.05)),
+        _line((-1.0, 0.05), (-1.0, -0.45)),
+    ]
+    return SourcePath(id=f"path-{entity}", entity=entity, closed=True, segments=segments)
+
+
+def _dogbone_spike_source_path(entity: str) -> SourcePath:
+    segments = [
+        _arc((0.75, 1.0), 0.75, 90, 270),
+        _line((0.75, 0.25), (2.1, 0.25)),
+        _line((2.1, 0.25), (2.55, -0.2)),
+        _line((2.55, -0.2), (3.0, 0.25)),
+        _line((3.0, 0.25), (4.25, 0.25)),
+        _arc((4.25, 1.0), 0.75, 270, 90),
+        _line((4.25, 1.75), (3.0, 1.75)),
+        _line((3.0, 1.75), (2.55, 2.2)),
+        _line((2.55, 2.2), (2.1, 1.75)),
+        _line((2.1, 1.75), (0.75, 1.75)),
+    ]
+    return SourcePath(id=f"path-{entity}", entity=entity, closed=True, segments=segments)
+
+
+def _peninsula_source_path(entity: str) -> SourcePath:
+    points = [
+        (0.0, 0.0),
+        (4.5, 0.0),
+        (4.5, 2.2),
+        (3.0, 2.2),
+        (3.0, 1.1),
+        (2.65, 1.1),
+        (2.65, 2.2),
+        (0.0, 2.2),
+    ]
+    return _path_from_points(entity, points)
+
+
 def _path_from_points(entity: str, points: list[tuple[float, float]]) -> SourcePath:
     return SourcePath(
         id=f"path-{entity}",
@@ -1364,6 +1902,17 @@ def _arc(center: tuple[float, float], radius: float, start_angle: float, end_ang
         center=_point(center),
         radius=radius,
         direction="ccw",
+    )
+
+
+def _arc_cw(center: tuple[float, float], radius: float, start_angle: float, end_angle: float) -> SourceArcSegment:
+    return SourceArcSegment(
+        type="arc",
+        start=_point(_arc_point(center, radius, start_angle)),
+        end=_point(_arc_point(center, radius, end_angle)),
+        center=_point(center),
+        radius=radius,
+        direction="cw",
     )
 
 

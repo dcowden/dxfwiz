@@ -5,6 +5,7 @@ import math
 from dxfwiz.schemas.job import DrillOperation, HelicalContourOperation, HelicalPocketOperation
 from dxfwiz.schemas.machine import Tool
 from dxfwiz.toolpaths.model import ToolpathPass
+from dxfwiz.toolpaths.operations import _depth_passes
 
 
 def drill_operation_to_toolpaths(
@@ -165,6 +166,26 @@ def helical_pocket_operation_to_toolpaths(
         )
         rough_passes: list[ToolpathPass] = []
     else:
+        rough_depths = _depth_passes(operation.depth, operation.roughing.depth_per_pass, tool.depth_per_pass)
+        rough_moves = []
+        previous_depth = 0.0
+        for depth in rough_depths:
+            rough_moves.extend(
+                _helical_pocket_moves(
+                    center=center,
+                    first_radius=min(tool.diameter / 2 * 0.95, rough_radius),
+                    final_radius=rough_radius,
+                    target_z=-depth,
+                    pitch=operation.pitch,
+                    stepover=tool.diameter * operation.stepover_percent / 100,
+                    direction=direction,
+                    safe_z=safe_z,
+                    feed=effective_feed,
+                    retract=True,
+                    start_z=-previous_depth,
+                )
+            )
+            previous_depth = depth
         rough_passes = [
             ToolpathPass(
                 id=f"{operation.id}-rough-helical-pocket",
@@ -176,18 +197,7 @@ def helical_pocket_operation_to_toolpaths(
                 feed_rate=effective_feed,
                 z_top=0.0,
                 z_bottom=target,
-                moves=_helical_pocket_moves(
-                    center=center,
-                    first_radius=min(tool.diameter / 2 * 0.95, rough_radius),
-                    final_radius=rough_radius,
-                    target_z=target,
-                    pitch=operation.pitch,
-                    stepover=tool.diameter * operation.stepover_percent / 100,
-                    direction=direction,
-                    safe_z=safe_z,
-                    feed=effective_feed,
-                    retract=not (operation.finishing.enabled and operation.finishing.side),
-                ),
+                moves=rough_moves,
                 warnings=warnings,
             )
         ]
@@ -211,7 +221,7 @@ def helical_pocket_operation_to_toolpaths(
                     direction,
                     safe_z,
                     effective_feed,
-                    enter_at_safe_z=not rough_passes,
+                    enter_at_safe_z=True,
                 ),
             )
         )
@@ -226,15 +236,16 @@ def _helix_moves(
     direction: str,
     safe_z: float,
     feed: float,
+    start_z: float = 0.0,
 ) -> list[dict]:
     angle = 0.0
     x = center[0] + radius
     y = center[1]
     moves: list[dict] = [
         {"type": "rapid", "x": x, "y": y, "z": safe_z},
-        {"type": "line", "z": 0.0, "feed": feed},
+        {"type": "line", "z": start_z, "feed": feed},
     ]
-    z = 0.0
+    z = start_z
     while z > target_z + 1e-9:
         remaining = z - target_z
         step = min(pitch, remaining)
@@ -272,9 +283,10 @@ def _helical_pocket_moves(
     safe_z: float,
     feed: float,
     retract: bool = True,
+    start_z: float = 0.0,
 ) -> list[dict]:
     radius = max(1e-6, first_radius)
-    moves = _helix_moves(center, radius, target_z, pitch, direction, safe_z, feed)
+    moves = _helix_moves(center, radius, target_z, pitch, direction, safe_z, feed, start_z=start_z)
     if moves and moves[-1].get("type") == "rapid":
         moves.pop()
     current_xy = _current_xy_from_moves(moves, center, radius)

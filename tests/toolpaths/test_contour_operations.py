@@ -211,7 +211,7 @@ def test_outer_contour_ramps_down_around_loop_without_vertical_stepdowns():
     PREVIEWS.append(("test_outer_contour_ramps_down_around_loop_without_vertical_stepdowns", source_path, passes))
 
 
-def test_contour_with_ramping_and_finish_does_not_duplicate_bottom_cleanup():
+def test_contour_with_ramping_and_finish_keeps_rough_bottom_cleanup():
     source_path = rectangle_source_path("e4", width=4, height=2)
     tool = make_test_tool(diameter=0.25, depth_per_pass=0.125)
     operation = ContourOperation.model_validate(
@@ -244,8 +244,9 @@ def test_contour_with_ramping_and_finish_does_not_duplicate_bottom_cleanup():
 
     assert [toolpath_pass.kind for toolpath_pass in passes] == ["rough_contour", "finish_contour"]
     assert len(_line_move_xy_values(passes[0])) > 9
-    assert sum(1 for z in _line_move_z_values(passes[0]) if z == pytest.approx(-0.25)) == 1
-    PREVIEWS.append(("test_contour_with_ramping_and_finish_does_not_duplicate_bottom_cleanup", source_path, passes))
+    assert sum(1 for z in _line_move_z_values(passes[0]) if z == pytest.approx(-0.25)) > 1
+    assert passes[1].z_bottom == pytest.approx(-0.25)
+    PREVIEWS.append(("test_contour_with_ramping_and_finish_keeps_rough_bottom_cleanup", source_path, passes))
 
 
 def test_contour_tabs_are_hopped_only_on_depths_below_tab_top_without_ramping():

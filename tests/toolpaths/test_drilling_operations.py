@@ -6,7 +6,7 @@ from dxfwiz.schemas.common import Point2D
 from dxfwiz.schemas.job import DrillOperation, HelicalContourOperation, HelicalPocketOperation
 from dxfwiz.schemas.machine import Tool
 from dxfwiz.toolpaths.drilling import drill_operation_to_toolpaths, helical_contour_operation_to_toolpaths, helical_pocket_operation_to_toolpaths
-from dxfwiz.toolpaths.operations import render_toolpath_preview_sheet_svg
+from dxfwiz.toolpaths.operations import _depth_passes, render_toolpath_preview_sheet_svg
 from dxfwiz.toolpaths.model import SourceArcSegment, SourcePath
 
 
@@ -185,17 +185,20 @@ def test_helical_pocket_prefer_arcs_uses_arc_moves_for_rough_and_finish():
     rough_arcs = [move for move in passes[0].moves if move.type == "arc"]
     rough_rapid_moves = [move for move in passes[0].moves if move.type == "rapid"]
     finish_rapid_moves = [move for move in passes[1].moves if move.type == "rapid"]
-    finish_entry_moves = [move for move in passes[1].moves[:1] if move.type == "line"]
+    finish_entry_moves = [move for move in passes[1].moves[:2] if move.type == "line"]
     assert rough_xy_lines == []
     assert len(rough_arcs) >= 8
     arc_radii = [round((move.i ** 2 + move.j ** 2) ** 0.5, 4) for move in rough_arcs]
+    rough_depths = _depth_passes(operation.depth, operation.roughing.depth_per_pass, tool.depth_per_pass)
     assert len(set(arc_radii)) > 3
-    assert passes[0].moves[-1].type == "arc"
-    assert len(rough_rapid_moves) == 1
+    assert rough_arcs[-1].z == pytest.approx(-0.25)
+    assert passes[0].moves[-1].type == "rapid"
+    assert len(rough_rapid_moves) == 2 * len(rough_depths)
+    assert passes[1].moves[0].type == "rapid"
     assert finish_rapid_moves[-1].z == pytest.approx(0.5)
     assert finish_entry_moves[0].z == pytest.approx(-0.25)
-    assert finish_entry_moves[0].x is not None
-    assert finish_entry_moves[0].y is not None
+    assert finish_entry_moves[0].x is None
+    assert finish_entry_moves[0].y is None
     assert any(move.type == "arc" and move.z == pytest.approx(-0.25) for move in passes[1].moves)
     assert not passes[0].warnings
     PREVIEWS.append(("test_helical_pocket_prefer_arcs_uses_arc_moves_for_rough_and_finish", circle_source_path("e-pocket", (1.0, 1.0), 1.25), passes))

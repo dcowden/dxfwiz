@@ -124,7 +124,7 @@ def contour_operation_to_cavalier_toolpaths(
                                 depths,
                                 safe_z,
                                 feed,
-                                bottom_cleanup=not (operation.finishing.enabled and operation.finishing.side),
+                                bottom_cleanup=True,
                                 operation=operation,
                                 tool=tool,
                             )
@@ -138,7 +138,7 @@ def contour_operation_to_cavalier_toolpaths(
                             depths,
                             safe_z,
                             feed,
-                            bottom_cleanup=not (operation.finishing.enabled and operation.finishing.side),
+                            bottom_cleanup=True,
                         )
                     )
                 else:
@@ -363,18 +363,26 @@ def helical_pocket_operation_to_cavalier_toolpaths(
 
     if operation.roughing.enabled and rough_paths:
         rough_center, rough_radius = _circle_geometry_from_source_path(rough_paths[0])
-        moves = _helical_pocket_moves(
-            center=rough_center,
-            first_radius=min(tool.diameter / 2 * 0.95, rough_radius),
-            final_radius=rough_radius,
-            target_z=target,
-            pitch=operation.pitch,
-            stepover=tool.diameter * operation.stepover_percent / 100,
-            direction=direction,
-            safe_z=safe_z,
-            feed=feed,
-            retract=not (operation.finishing.enabled and operation.finishing.side),
-        )
+        moves = []
+        rough_depths = _depth_passes(operation.depth, operation.roughing.depth_per_pass, tool.depth_per_pass)
+        previous_depth = 0.0
+        for depth in rough_depths:
+            moves.extend(
+                _helical_pocket_moves(
+                    center=rough_center,
+                    first_radius=min(tool.diameter / 2 * 0.95, rough_radius),
+                    final_radius=rough_radius,
+                    target_z=-depth,
+                    pitch=operation.pitch,
+                    stepover=tool.diameter * operation.stepover_percent / 100,
+                    direction=direction,
+                    safe_z=safe_z,
+                    feed=feed,
+                    retract=True,
+                    start_z=-previous_depth,
+                )
+            )
+            previous_depth = depth
         passes.append(
             ToolpathPass(
                 id=f"{operation.id}-cavc-rough-helical-pocket",
@@ -418,7 +426,7 @@ def helical_pocket_operation_to_cavalier_toolpaths(
                     direction,
                     safe_z,
                     feed,
-                    enter_at_safe_z=not passes,
+                    enter_at_safe_z=True,
                 ),
             )
         )
@@ -476,7 +484,6 @@ def _offset_clearing_pass(
     loops = [loop for level in levels for loop in level]
     if levels:
         loops.extend(_terminal_cleanup_paths(levels[-1], tool.diameter / 2))
-        loops.extend(_coverage_cleanup_paths(source_path, loops, offset_distance, tool.diameter / 2, stepover))
     return _path_set_pass(
         operation=operation,
         source_path=source_path,
@@ -542,13 +549,45 @@ def _path_set_pass(
     for depth in depths:
         z_bottom = -depth
         if link_paths:
-            moves.extend(_linked_source_path_moves(paths, z_bottom, safe_z, feed, travel_boundaries or [], ramp_entry))
+            moves.extend(
+                _linked_source_path_moves(
+                    paths,
+                    z_bottom,
+                    safe_z,
+                    feed,
+                    travel_boundaries or [],
+                    ramp_entry,
+                    landing_cleanup_distance=tool.diameter / 2,
+                )
+            )
         else:
             for path in paths:
                 if path.closed:
-                    moves.extend(_closed_source_path_moves(path, z_bottom, safe_z, feed, ramp_entry=ramp_entry))
+                    moves.extend(
+                        _closed_source_path_moves(
+                            path,
+                            z_bottom,
+                            safe_z,
+                            feed,
+                            ramp_entry=ramp_entry,
+                            landing_cleanup_distance=tool.diameter / 2,
+                        )
+                    )
                 else:
                     moves.extend(_open_source_path_moves(path, z_bottom, safe_z, feed))
+    if operation.strategy == "offset" and paths and depths:
+        moves.extend(
+            _floor_coverage_cleanup_moves(
+                source_path,
+                moves,
+                z_bottom=-depths[-1],
+                offset_distance=offset_distance,
+                cutter_radius=tool.diameter / 2,
+                stepover=tool.diameter * operation.stepover_percent / 100,
+                safe_z=safe_z,
+                feed=feed,
+            )
+        )
     warnings = []
     if not paths:
         warnings.append(
@@ -677,54 +716,239 @@ def _terminal_residual_region(loop: SourcePath, cutter_radius: float):
     return polygon.difference(swept)
 
 
-def _coverage_cleanup_paths(
+def _floor_coverage_cleanup_moves(
     source_path: SourcePath,
-    paths: list[SourcePath],
+    moves: list,
+    *,
+    z_bottom: float,
     offset_distance: float,
     cutter_radius: float,
     stepover: float,
-) -> list[SourcePath]:
-    source = _source_path_polygon(source_path)
-    if source is None:
+    safe_z: float,
+    feed: float,
+) -> list:
+    source, center_region, target_material = _required_floor_material(source_path, offset_distance, cutter_radius)
+    if source is None or center_region is None or target_material is None:
         return []
-    center_region = source.buffer(-offset_distance, join_style=1)
-    if center_region.is_empty:
+    swept_material = _bottom_depth_swept_material(moves, z_bottom, cutter_radius)
+    if swept_material.is_empty:
         return []
-    target_material = center_region.buffer(cutter_radius, cap_style=1, join_style=1).intersection(source)
-    swept_regions = []
-    for path in paths:
-        line = _source_path_linestring(path)
-        if line is not None and line.length > 1e-9:
-            swept_regions.append(line.buffer(cutter_radius, cap_style=1, join_style=1))
-    if not swept_regions:
-        return []
-    swept_material = unary_union(swept_regions).buffer(max(cutter_radius * 0.01, 1e-5))
-    residual = target_material.difference(swept_material)
-    cleanup_paths: list[SourcePath] = []
-    min_area = max(cutter_radius * cutter_radius * 0.002, 1e-7)
+    residual = target_material.difference(swept_material.buffer(max(cutter_radius * 0.001, 1e-6)))
+    cleanup_moves = []
+    min_area = max(cutter_radius * cutter_radius * 1e-5, 1e-8)
     cleanup_stepover = max(cutter_radius * 0.5, min(stepover, cutter_radius))
     for index, polygon in enumerate(_polygons(residual)):
         if polygon.area <= min_area:
             continue
         reachable_centers = center_region.intersection(polygon.buffer(cutter_radius, cap_style=1, join_style=1))
-        for segment_index, segment in enumerate(_cleanup_segments(reachable_centers, cleanup_stepover, cutter_radius)):
-            cleanup_paths.append(
-                _open_polyline_source_path(
-                    f"{source_path.id}-coverage-cleanup-{index}-{segment_index}",
-                    source_path.entity,
-                    segment,
+        for segment in _cleanup_segments(reachable_centers, cleanup_stepover, cutter_radius):
+            cleanup_moves.extend(_open_cleanup_segment_moves(segment, z_bottom, safe_z=safe_z, feed=feed))
+    return cleanup_moves
+
+
+def _floor_raster_cleanup_moves(
+    source_path: SourcePath,
+    *,
+    z_bottom: float,
+    offset_distance: float,
+    cutter_radius: float,
+    stepover: float,
+    safe_z: float,
+    feed: float,
+) -> list:
+    _source, center_region, _target_material = _required_floor_material(source_path, offset_distance, cutter_radius)
+    if center_region is None or center_region.is_empty:
+        return []
+    cleanup_moves = []
+    cleanup_stepover = max(cutter_radius * 0.5, min(stepover, cutter_radius * 1.6))
+    for polygon in _polygons(center_region):
+        boundary_points = [(float(x), float(y)) for x, y in polygon.exterior.coords]
+        row_segments = _raster_segments(polygon, cleanup_stepover)
+        if not row_segments:
+            continue
+        linked_points = _link_raster_segments(row_segments, boundary_points, polygon)
+        cleanup_moves.extend(_open_cleanup_segment_moves(linked_points, z_bottom, safe_z=safe_z, feed=feed))
+    return cleanup_moves
+
+
+def _required_floor_material(
+    source_path: SourcePath,
+    offset_distance: float,
+    cutter_radius: float,
+) -> tuple[Polygon | None, object | None, object | None]:
+    source = _source_path_polygon(source_path)
+    if source is None:
+        return None, None, None
+    center_region = source.buffer(-offset_distance, join_style=1)
+    if center_region.is_empty:
+        return source, center_region, None
+    target_material = center_region.buffer(cutter_radius, cap_style=1, join_style=1).intersection(source)
+    if target_material.is_empty:
+        return source, center_region, None
+    return source, center_region, target_material
+
+
+def _bottom_depth_swept_material(moves: list, z_bottom: float, cutter_radius: float):
+    chains: list[list[tuple[float, float]]] = []
+    current_chain: list[tuple[float, float]] | None = None
+    current_x = current_y = current_z = None
+    z_limit = z_bottom + 1e-7
+    for move in moves:
+        if move.type == "rapid":
+            current_chain = None
+            current_x, current_y, current_z = _modal_endpoint(move, current_x, current_y, current_z)
+            continue
+        if move.type == "line":
+            end_x, end_y, end_z = _modal_endpoint(move, current_x, current_y, current_z)
+            if current_x is not None and current_y is not None and end_x is not None and end_y is not None:
+                line = _bottom_depth_line_segment(
+                    (current_x, current_y, current_z),
+                    (end_x, end_y, end_z),
+                    z_limit,
                 )
-            )
-    return cleanup_paths
+                if line is not None:
+                    current_chain = _append_line_to_chains(chains, current_chain, line)
+                else:
+                    current_chain = None
+            current_x, current_y, current_z = end_x, end_y, end_z
+            continue
+        if move.type == "arc":
+            if current_x is not None and current_y is not None:
+                start_z = current_z if current_z is not None else move.z
+                end_z = move.z if move.z is not None else start_z
+                current_chain = _append_lines_to_chains(
+                    chains,
+                    current_chain,
+                    _bottom_depth_polyline_segments(
+                        _arc_move_points((current_x, current_y), start_z, move, end_z), z_limit
+                    ),
+                )
+            current_x = move.x
+            current_y = move.y
+            current_z = move.z if move.z is not None else current_z
+    lines = [LineString(chain) for chain in chains if len(chain) >= 2]
+    if not lines:
+        return Polygon()
+    return unary_union([line.buffer(cutter_radius, cap_style=2, join_style=1) for line in lines])
 
 
-def _source_path_linestring(path: SourcePath) -> LineString | None:
-    points = source_path_points(path, arc_segments=96)
-    if len(points) < 2:
+def _append_lines_to_chains(
+    chains: list[list[tuple[float, float]]],
+    current_chain: list[tuple[float, float]] | None,
+    lines: list[LineString],
+) -> list[tuple[float, float]] | None:
+    for line in lines:
+        current_chain = _append_line_to_chains(chains, current_chain, line)
+    return current_chain
+
+
+def _append_line_to_chains(
+    chains: list[list[tuple[float, float]]],
+    current_chain: list[tuple[float, float]] | None,
+    line: LineString,
+) -> list[tuple[float, float]]:
+    coords = [(float(x), float(y)) for x, y in line.coords]
+    if len(coords) < 2:
+        if current_chain is None:
+            current_chain = []
+            chains.append(current_chain)
+        return current_chain
+    if current_chain is None or not current_chain or not _same_point(current_chain[-1], coords[0]):
+        current_chain = [coords[0]]
+        chains.append(current_chain)
+    current_chain.extend(coords[1:])
+    return current_chain
+
+
+def _modal_endpoint(move, current_x, current_y, current_z) -> tuple[float | None, float | None, float | None]:
+    return (
+        move.x if getattr(move, "x", None) is not None else current_x,
+        move.y if getattr(move, "y", None) is not None else current_y,
+        move.z if getattr(move, "z", None) is not None else current_z,
+    )
+
+
+def _bottom_depth_line_segment(
+    start: tuple[float, float, float | None],
+    end: tuple[float, float, float | None],
+    z_limit: float,
+) -> LineString | None:
+    start_x, start_y, start_z = start
+    end_x, end_y, end_z = end
+    if _same_point((start_x, start_y), (end_x, end_y)):
         return None
-    if path.closed and not _same_point(points[0], points[-1]):
-        points = [*points, points[0]]
-    return LineString(points)
+    if start_z is None or end_z is None:
+        return None
+    if start_z <= z_limit and end_z <= z_limit:
+        return LineString([(start_x, start_y), (end_x, end_y)])
+    if start_z > z_limit and end_z > z_limit:
+        return None
+    if abs(end_z - start_z) <= 1e-12:
+        return None
+    fraction = (z_limit - start_z) / (end_z - start_z)
+    fraction = max(0.0, min(1.0, fraction))
+    cross = (start_x + (end_x - start_x) * fraction, start_y + (end_y - start_y) * fraction)
+    if start_z <= z_limit:
+        return LineString([(start_x, start_y), cross])
+    return LineString([cross, (end_x, end_y)])
+
+
+def _bottom_depth_polyline_segments(points: list[tuple[float, float, float | None]], z_limit: float) -> list[LineString]:
+    lines = []
+    for start, end in zip(points, points[1:], strict=False):
+        line = _bottom_depth_line_segment(start, end, z_limit)
+        if line is not None and line.length > 1e-9:
+            lines.append(line)
+    return lines
+
+
+def _arc_move_points(
+    start_xy: tuple[float, float],
+    start_z: float | None,
+    move: ArcMove,
+    end_z: float | None,
+) -> list[tuple[float, float, float | None]]:
+    center = (start_xy[0] + move.i, start_xy[1] + move.j)
+    radius = math.hypot(start_xy[0] - center[0], start_xy[1] - center[1])
+    if radius <= 1e-12:
+        return [(start_xy[0], start_xy[1], start_z), (move.x, move.y, end_z)]
+    start_angle = math.atan2(start_xy[1] - center[1], start_xy[0] - center[0])
+    end_angle = math.atan2(move.y - center[1], move.x - center[0])
+    sweep = end_angle - start_angle
+    if move.direction == "ccw" and sweep <= 0:
+        sweep += 2 * math.pi
+    if move.direction == "cw" and sweep >= 0:
+        sweep -= 2 * math.pi
+    steps = max(8, int(abs(sweep) * radius / max(radius * 0.08, 0.005)))
+    points = []
+    for index in range(steps + 1):
+        fraction = index / steps
+        angle = start_angle + sweep * fraction
+        z = None
+        if start_z is not None and end_z is not None:
+            z = start_z + (end_z - start_z) * fraction
+        points.append((center[0] + math.cos(angle) * radius, center[1] + math.sin(angle) * radius, z))
+    return points
+
+
+def _open_cleanup_segment_moves(
+    points: list[tuple[float, float]],
+    z_bottom: float,
+    *,
+    safe_z: float,
+    feed: float,
+) -> list:
+    if len(points) < 2:
+        return []
+    start = points[0]
+    moves = [
+        RapidMove(type="rapid", x=start[0], y=start[1], z=safe_z),
+        LineMove(type="line", z=z_bottom, feed=feed),
+    ]
+    for point in points[1:]:
+        moves.append(LineMove(type="line", x=point[0], y=point[1], z=z_bottom, feed=feed))
+    moves.append(RapidMove(type="rapid", z=safe_z))
+    return moves
 
 
 def _polygons(geometry) -> list[Polygon]:
@@ -798,6 +1022,7 @@ def _linked_source_path_moves(
     feed: float,
     travel_boundaries: list[SourcePath],
     ramp_entry: bool,
+    landing_cleanup_distance: float = 0.0,
 ) -> list:
     """Kiri-style local path linking.
 
@@ -825,7 +1050,16 @@ def _linked_source_path_moves(
 
         if current_xy is None:
             if ramp_entry and path.closed:
-                moves.extend(_ramped_closed_source_path_moves(path, z_bottom, safe_z, feed, retract=False))
+                moves.extend(
+                    _ramped_closed_source_path_moves(
+                        path,
+                        z_bottom,
+                        safe_z,
+                        feed,
+                        retract=False,
+                        landing_cleanup_distance=landing_cleanup_distance,
+                    )
+                )
                 current_xy = _path_end(path)
                 continue
             moves.append(RapidMove(type="rapid", x=start[0], y=start[1], z=safe_z))
@@ -973,11 +1207,25 @@ def _can_cut_link(start: tuple[float, float], end: tuple[float, float], travel_r
     return any(region.buffer(1e-9).covers(connector) for region in travel_regions)
 
 
-def _closed_source_path_moves(source_path: SourcePath, z_bottom: float, safe_z: float, feed: float, ramp_entry: bool = False) -> list:
+def _closed_source_path_moves(
+    source_path: SourcePath,
+    z_bottom: float,
+    safe_z: float,
+    feed: float,
+    ramp_entry: bool = False,
+    landing_cleanup_distance: float = 0.0,
+) -> list:
     if not source_path.segments:
         return []
     if ramp_entry:
-        return _ramped_closed_source_path_moves(source_path, z_bottom, safe_z, feed, retract=True)
+        return _ramped_closed_source_path_moves(
+            source_path,
+            z_bottom,
+            safe_z,
+            feed,
+            retract=True,
+            landing_cleanup_distance=landing_cleanup_distance,
+        )
     start = source_path.segments[0].start
     moves = [RapidMove(type="rapid", x=start.x, y=start.y, z=safe_z), LineMove(type="line", z=z_bottom, feed=feed)]
     for segment in source_path.segments:
@@ -1007,6 +1255,7 @@ def _ramped_closed_source_path_moves(
     feed: float,
     *,
     retract: bool,
+    landing_cleanup_distance: float = 0.0,
 ) -> list:
     if not source_path.closed or not source_path.segments:
         return _closed_source_path_moves(source_path, z_bottom, safe_z, feed, ramp_entry=False)
@@ -1021,10 +1270,52 @@ def _ramped_closed_source_path_moves(
         traveled += _segment_length(segment)
         z = z_bottom * min(1.0, traveled / path_length)
         moves.extend(_segment_cut_move(segment, z, feed))
+    moves.extend(_ramp_landing_cleanup_moves(source_path, z_bottom, feed, landing_cleanup_distance))
     moves.extend(_source_path_cut_moves(source_path, z_bottom, feed))
     if retract:
         moves.append(RapidMove(type="rapid", z=safe_z))
     return moves
+
+
+def _ramp_landing_cleanup_moves(
+    source_path: SourcePath,
+    z_bottom: float,
+    feed: float,
+    distance: float,
+) -> list:
+    if distance <= 1e-9:
+        return []
+    start = _path_start(source_path)
+    previous = _point_before_path_start(source_path, distance)
+    if start is None or previous is None or _same_point(start, previous):
+        return []
+    return [
+        LineMove(type="line", x=previous[0], y=previous[1], z=z_bottom, feed=feed),
+        LineMove(type="line", x=start[0], y=start[1], z=z_bottom, feed=feed),
+    ]
+
+
+def _point_before_path_start(source_path: SourcePath, distance: float) -> tuple[float, float] | None:
+    points = source_path_points(source_path, arc_segments=96)
+    if len(points) < 2:
+        return None
+    start = points[0]
+    current = start
+    remaining = distance
+    for point in reversed(points[1:]):
+        segment_length = math.sqrt(_distance_sq(current, point))
+        if segment_length <= 1e-12:
+            current = point
+            continue
+        if segment_length >= remaining:
+            fraction = remaining / segment_length
+            return (
+                current[0] + (point[0] - current[0]) * fraction,
+                current[1] + (point[1] - current[1]) * fraction,
+            )
+        remaining -= segment_length
+        current = point
+    return current
 
 
 def _ramped_source_path_moves(

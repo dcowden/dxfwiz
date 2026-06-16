@@ -314,10 +314,20 @@ def test_cavalier_offset_pocket_links_loops_inside_travel_boundary():
     stepover = tool.diameter * operation.stepover_percent / 100
     levels = cavalier_pocketing._inward_offset_levels(source_path, tool.diameter / 2, stepover)
     unlinked_rapid_entries = sum(len(level) for level in levels) * 2
+    linked_offset_moves = cavalier_pocketing._linked_source_path_moves(
+        [loop for level in levels for loop in level],
+        -operation.depth,
+        0.5,
+        tool.feed_rate,
+        levels[0],
+        ramp_entry=True,
+        landing_cleanup_distance=tool.diameter / 2,
+    )
     linked_rapid_entries = [
-        move for move in passes[0].moves if move.type == "rapid" and move.x is not None and move.y is not None
+        move for move in linked_offset_moves if move.type == "rapid" and move.x is not None and move.y is not None
     ]
 
+    assert passes[0].moves
     assert len(linked_rapid_entries) < unlinked_rapid_entries
     assert len(linked_rapid_entries) <= 8
 
@@ -351,7 +361,9 @@ def test_cavalier_real_circle_helical_pocket_is_a_helix():
     rough_arcs = [move for move in passes[0].moves if move.type == "arc"]
     assert len(rough_arcs) >= 8
     assert len({round(move.z, 4) for move in rough_arcs}) > 2
-    assert passes[0].moves[-1].type == "arc"
+    assert rough_arcs[-1].z == pytest.approx(passes[0].z_bottom)
+    assert passes[0].moves[-1].type == "rapid"
+    assert passes[1].moves[0].type == "rapid"
     assert_arc_moves_are_geometrically_continuous(passes[0])
 
 

@@ -56,7 +56,6 @@ def contour_operation_to_toolpaths(
             )
         if operation.ramping:
             z_bottom = -depths[-1]
-            has_finish_contour = operation.finishing.enabled and operation.finishing.side
             if rough_points:
                 passes.append(
                     ToolpathPass(
@@ -78,7 +77,7 @@ def contour_operation_to_toolpaths(
                             depths,
                             safe_z,
                             feed,
-                            bottom_cleanup=not has_finish_contour,
+                            bottom_cleanup=True,
                             operation=operation,
                             tool=tool,
                         ),

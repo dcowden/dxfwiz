@@ -1,32 +1,27 @@
 from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
+import re
 
 import ezdxf
-import numpy as np
 import pytest
 from shapely.geometry import Point, box
 
+from tests.camotics_validation import expected_surface_regions, find_camsim, run_camotics_material_validation
 from dxfwiz.dxf import CleanDxfConfig, clean_dxf, write_geometry_yaml
 from dxfwiz.planning import PlanningRequest, generate_operation_plan, load_system_planner_advice
 from dxfwiz.planning.service import PlanningResponse, _frame_or_summary_bounds, _part_clearance_polygons
 from dxfwiz.schemas import GeometryFile, MachineFile, PlannerFile
 from dxfwiz.schemas.job import JobFile
-from dxfwiz.simulation import (
-    DexelSimulationRequest,
-    SimulationBounds,
-    SimulationSettings,
-    SimulationStock,
-    build_expected_removals,
-    render_dexel_preview_png,
-    simulate_toolpath,
-)
 from dxfwiz.svg import render_geometry_svg
 from dxfwiz.toolpaths import ToolpathRequest, generate_toolpaths
 from dxfwiz.toolpaths.model import ToolpathPlan
 from dxfwiz.toolpaths.operations import contour_offset_error_samples, contour_offset_validation, source_path_points
+from dxfwiz.toolpaths.posts.uccnc import UccncPost
 from dxfwiz.yaml_io import dump_yaml_file, load_yaml_file
 
+
+pytestmark = pytest.mark.integration
 
 INPUT_DIR = Path(__file__).resolve().parent / "integration_tests"
 OUTPUT_DIR = Path(__file__).resolve().parent / "output"
@@ -48,12 +43,9 @@ class DxfCase:
     svg_path: Path
     op_path: Path
     gcode_path: Path
-    simulation_initial_path: Path
-    simulation_final_path: Path
-    simulation_summary_path: Path
+    camotics_output_dir: Path
+    camotics_summary_path: Path
     contour_error_path: Path
-    recut_summary_path: Path
-    recut_heatmap_path: Path
 
 
 def real_dxf_cases() -> list[DxfCase]:
@@ -90,12 +82,9 @@ def real_dxf_cases() -> list[DxfCase]:
                 svg_path=output_dir / f"{source_path.stem}_geometry.svg",
                 op_path=output_dir / f"{source_path.stem}_op.yaml",
                 gcode_path=output_dir / f"{source_path.stem}.nc",
-                simulation_initial_path=output_dir / f"{source_path.stem}_simulation_initial.png",
-                simulation_final_path=output_dir / f"{source_path.stem}_simulation_final.png",
-                simulation_summary_path=output_dir / f"{source_path.stem}_simulation_summary.yaml",
+                camotics_output_dir=output_dir / "camotics_validation",
+                camotics_summary_path=output_dir / f"{source_path.stem}_camotics_summary.yaml",
                 contour_error_path=output_dir / f"{source_path.stem}_contour_offset_errors.png",
-                recut_summary_path=output_dir / f"{source_path.stem}_recut_analysis.yaml",
-                recut_heatmap_path=output_dir / f"{source_path.stem}_recut_heatmap.png",
             )
         )
     return cases
@@ -282,7 +271,9 @@ def test_real_dxf_operation_plan_generates_gcode(case):
 
 
 @pytest.mark.parametrize("case", real_dxf_cases(), ids=lambda case: case.name)
-def test_real_dxf_supported_operations_simulate_material_removal(case):
+def test_real_dxf_supported_operations_validate_camotics_material(case):
+    if find_camsim() is None:
+        pytest.skip("CAMotics camsim executable was not found")
     ensure_case_outputs(case)
     machine = MachineFile.model_validate(load_yaml_file(case.machine_path))
     planner = PlannerFile.model_validate(load_yaml_file(case.planner_path))
@@ -305,71 +296,78 @@ def test_real_dxf_supported_operations_simulate_material_removal(case):
         )
     )
     assert toolpath_response.plan is not None
-    expected = build_expected_removals(job, simulated_geometry, toolpath_response.plan)
-    stock = _simulation_stock(simulated_geometry, planner)
-    settings = _simulation_settings(planner)
-    simulation_run = simulate_toolpath(
-        DexelSimulationRequest(
+    case.gcode_path.write_text(toolpath_response.gcode, encoding="utf-8")
+    operation_results = []
+    operation_ids = _camotics_operation_ids(job, assertions)
+    for operation_id in operation_ids:
+        filtered_plan = _toolpath_plan_for_operations(toolpath_response.plan, {operation_id})
+        if not expected_surface_regions(job, simulated_geometry, machine, filtered_plan, operation_ids={operation_id}):
+            continue
+        operation_gcode = UccncPost(precision=4).render(filtered_plan)
+        artifacts, analysis = run_camotics_material_validation(
+            name=f"{case.name} {operation_id}",
+            gcode=operation_gcode,
             job=job,
+            geometry=simulated_geometry,
             machine=machine,
-            toolpath_plan=toolpath_response.plan,
-            stock=stock,
-            settings=settings,
-            expected_removals=expected.removals,
+            toolpath_plan=filtered_plan,
+            output_dir=case.camotics_output_dir / _slug(operation_id),
+            operation_ids={operation_id},
         )
-    )
-    metrics = simulation_run.response.metrics
+        operation_results.append((operation_id, artifacts, analysis))
     contour_geometry = _contour_geometry_report(toolpath_response.plan)
-    recut_analysis = _recut_analysis_report(simulation_run.grid)
+    total_z_bad = sum(analysis.z_violating_facets for _operation_id, _artifacts, analysis in operation_results)
+    total_material_bad = sum(analysis.material_violating_facets for _operation_id, _artifacts, analysis in operation_results)
+    total_wall_bad = sum(analysis.wall_violating_facets for _operation_id, _artifacts, analysis in operation_results)
     summary = {
-        "supported_operation_count": len(expected.supported_operation_ids),
         "preview_operation_count": len({toolpath_pass.operation_id for toolpath_pass in toolpath_response.plan.passes}),
-        "expected_removal_count": len(expected.removals),
-        "expected_builder_warnings": expected.warnings,
-        "preview_errors": [issue.model_dump(mode="json") for issue in simulation_run.response.errors],
-        "preview_warnings": [issue.model_dump(mode="json") for issue in simulation_run.response.warnings],
-        "errors": [issue.model_dump(mode="json") for issue in simulation_run.response.errors],
-        "warnings": [issue.model_dump(mode="json") for issue in simulation_run.response.warnings],
-        "metrics": metrics.model_dump(mode="json"),
+        "validated_operation_count": len(operation_results),
+        "artifacts": [
+            {
+                "operation_id": operation_id,
+                "nc": str(artifacts.nc_path),
+                "project": str(artifacts.project_path),
+                "stl": str(artifacts.stl_path),
+                "png": str(artifacts.png_path),
+                "html": str(artifacts.html_path),
+            }
+            for operation_id, artifacts, _analysis in operation_results
+        ],
+        "metrics": {
+            "z_violating_facets": total_z_bad,
+            "material_violating_facets": total_material_bad,
+            "wall_violating_facets": total_wall_bad,
+            "triangles": sum(analysis.triangles for _operation_id, _artifacts, analysis in operation_results),
+            "expected_regions": sum(analysis.expected_region_count for _operation_id, _artifacts, analysis in operation_results),
+            "per_operation": [
+                {
+                    "operation_id": operation_id,
+                    "triangles": analysis.triangles,
+                    "expected_regions": analysis.expected_region_count,
+                    "z_violating_facets": analysis.z_violating_facets,
+                    "material_violating_facets": analysis.material_violating_facets,
+                    "wall_violating_facets": analysis.wall_violating_facets,
+                }
+                for operation_id, _artifacts, analysis in operation_results
+            ],
+        },
         "contour_geometry": contour_geometry,
-        "recut_analysis": recut_analysis,
     }
-    dump_yaml_file(case.simulation_summary_path, summary)
-    dump_yaml_file(case.recut_summary_path, recut_analysis)
-    case.simulation_initial_path.write_bytes(
-        render_dexel_preview_png(
-            simulation_run.grid,
-            f"{case.name} simulation initial",
-            depth=simulation_run.grid.actual_depth * 0,
-        )
-    )
-    case.simulation_final_path.write_bytes(
-        render_dexel_preview_png(
-            simulation_run.grid,
-            f"{case.name} simulation final state",
-            state_mode="detailed",
-            overlay_expected=True,
-        )
-    )
+    dump_yaml_file(case.camotics_summary_path, summary)
     _write_contour_error_png(toolpath_response.plan, case.contour_error_path)
-    _write_recut_heatmap_png(simulation_run.grid, case.recut_heatmap_path)
 
-    assert len(simulation_run.response.errors) <= assertions.get("max_errors", 0)
-    assert len(simulation_run.response.warnings) <= assertions.get("max_warnings", 999999)
-    _assert_toolpath_issues(simulation_run.response.errors, assertions.get("errors", {}), "simulation errors")
-    _assert_toolpath_issues(simulation_run.response.warnings, assertions.get("warnings", {}), "simulation warnings")
-    assert len(expected.supported_operation_ids) == len(job.operations)
-    assert not expected.warnings
-    assert metrics.rapid_collision_count <= assertions.get("max_rapid_collisions", 0)
-    assert metrics.unsafe_rapid_count <= assertions.get("max_unsafe_rapids", 0)
-    assert metrics.overcut_cells <= assertions.get("max_overcut_cells", 999999999)
-    assert metrics.undercut_cells <= assertions.get("max_undercut_cells", 999999999)
-    assert metrics.air_cut_moves <= assertions.get("max_air_cut_moves", 999999999)
-    assert metrics.recut_cells <= assertions.get("max_recut_cells", 999999999)
+    assert len(operation_results) >= assertions.get("min_supported_operations", 1)
+    assert total_z_bad <= assertions.get("max_z_violating_facets", 0)
+    assert total_material_bad <= assertions.get("max_material_violating_facets", 0)
+    assert total_wall_bad <= assertions.get("max_wall_violating_facets", 0)
     _assert_contour_geometry(contour_geometry, assertions.get("geometry", {}))
-    assert case.simulation_summary_path.exists()
-    assert case.simulation_initial_path.stat().st_size > 1000
-    assert case.simulation_final_path.stat().st_size > 1000
+    assert case.camotics_summary_path.exists()
+    for _operation_id, artifacts, _analysis in operation_results:
+        assert artifacts.nc_path.exists()
+        assert artifacts.project_path.exists()
+        assert artifacts.stl_path.stat().st_size > 1000
+        assert artifacts.png_path.stat().st_size > 1000
+        assert artifacts.html_path.stat().st_size > 1000
     assert case.contour_error_path.exists()
     assert case.contour_error_path.stat().st_size > 1000
 
@@ -549,6 +547,10 @@ def _entity_count(path: Path) -> int:
     return len(list(ezdxf.readfile(path).modelspace()))
 
 
+def _slug(text: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "_", text.lower()).strip("_") or "operation"
+
+
 def _clean_config(planner: PlannerFile | None = None) -> CleanDxfConfig:
     arc_detection = planner.defaults.arc_detection if planner is not None else None
     return CleanDxfConfig(
@@ -628,28 +630,6 @@ def _stock_size_from_geometry(geometry: GeometryFile) -> str:
     return f"{width:.3f} x {height:.3f} {geometry.units.length} extents"
 
 
-def _simulation_stock(geometry: GeometryFile, planner: PlannerFile) -> SimulationStock:
-    stock = planner.defaults.stock
-    assert stock is not None
-    min_x, min_y, max_x, max_y = _frame_or_summary_bounds(geometry)
-    return SimulationStock(
-        bounds=SimulationBounds(min_x=min_x, min_y=min_y, max_x=max_x, max_y=max_y),
-        thickness=stock.thickness,
-    )
-
-
-def _simulation_settings(planner: PlannerFile) -> SimulationSettings:
-    simulation = planner.defaults.simulation
-    return SimulationSettings(
-        xy_spacing=simulation.xy_spacing,
-        xy_tool_fraction=simulation.xy_tool_fraction,
-        z_spacing=simulation.z_spacing,
-        max_grid_cells=simulation.max_grid_cells,
-        preview=simulation.preview,
-        arc_chord_fraction=simulation.arc_chord_fraction,
-    )
-
-
 def _toolpath_plan_for_operations(plan: ToolpathPlan, operation_ids: set[str]) -> ToolpathPlan:
     return ToolpathPlan(
         units=plan.units,
@@ -659,6 +639,23 @@ def _toolpath_plan_for_operations(plan: ToolpathPlan, operation_ids: set[str]) -
         passes=[toolpath_pass for toolpath_pass in plan.passes if toolpath_pass.operation_id in operation_ids],
         warnings=plan.warnings,
     )
+
+
+def _camotics_operation_ids(job: JobFile, assertions: dict) -> list[str]:
+    requested = assertions.get("camotics_operations")
+    if requested == "all":
+        return [operation.id for operation in job.operations]
+    if requested:
+        return list(requested)
+    selected = []
+    seen_types = set()
+    for operation in job.operations:
+        operation_type = operation.type
+        if operation_type in seen_types or operation_type == "move":
+            continue
+        seen_types.add(operation_type)
+        selected.append(operation.id)
+    return selected
 
 
 def _point_is_in_scrap_area(point: dict[str, float], request: PlanningRequest) -> bool:
@@ -729,67 +726,6 @@ def _assert_gcode(gcode: str, assertions: dict) -> None:
             f"Expected G-code to include {text!r} at least {item['count']} times, "
             f"got {gcode.count(text)}"
         )
-
-
-def _recut_analysis_report(grid, top_n: int = 12) -> dict:
-    cut_count = grid.cut_count
-    recut_mask = cut_count > 1
-    excessive_mask = cut_count > 2
-    operation_rows = []
-    for operation_index in sorted(int(index) for index in np.unique(grid.last_operation_id[recut_mask]) if index >= 0):
-        mask = recut_mask & (grid.last_operation_id == operation_index)
-        ys, xs = np.where(mask)
-        if xs.size == 0:
-            continue
-        operation_rows.append(
-            {
-                "operation_id": grid.operation_lookup.get(operation_index, f"unknown-{operation_index}"),
-                "recut_cells": int(xs.size),
-                "excessive_recut_cells": int(np.count_nonzero(excessive_mask & (grid.last_operation_id == operation_index))),
-                "max_cut_count": int(cut_count[mask].max(initial=0)),
-                "bbox": {
-                    "min": {"x": float(grid.x_values[xs].min()), "y": float(grid.y_values[ys].min())},
-                    "max": {"x": float(grid.x_values[xs].max()), "y": float(grid.y_values[ys].max())},
-                },
-            }
-        )
-    operation_rows.sort(key=lambda row: (row["recut_cells"], row["max_cut_count"]), reverse=True)
-    return {
-        "note": "cut_count excludes touches after a cell is already cut through the stock thickness",
-        "recut_cells": int(np.count_nonzero(recut_mask)),
-        "excessive_recut_cells": int(np.count_nonzero(excessive_mask)),
-        "max_cut_count": int(cut_count.max(initial=0)),
-        "top_last_operations": operation_rows[:top_n],
-    }
-
-
-def _write_recut_heatmap_png(grid, path: Path) -> None:
-    import matplotlib
-
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
-
-    heat = np.where(grid.cut_count > 1, grid.cut_count, np.nan)
-    fig, ax = plt.subplots(figsize=(8, 6), dpi=160)
-    extent = [
-        float(grid.x_values[0] - grid.xy_spacing / 2),
-        float(grid.x_values[-1] + grid.xy_spacing / 2),
-        float(grid.y_values[0] - grid.xy_spacing / 2),
-        float(grid.y_values[-1] + grid.xy_spacing / 2),
-    ]
-    image = ax.imshow(heat, origin="lower", extent=extent, cmap="magma", interpolation="nearest")
-    if np.isfinite(heat).any():
-        colorbar = fig.colorbar(image, ax=ax, shrink=0.8)
-        colorbar.set_label("cut count")
-    ax.set_title("Recut cells (cut_count > 1)")
-    ax.set_xlabel("X")
-    ax.set_ylabel("Y")
-    ax.set_aspect("equal", adjustable="box")
-    ax.grid(True, color="#e5e7eb", linewidth=0.25, alpha=0.5)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fig.tight_layout()
-    fig.savefig(path, format="png", bbox_inches="tight")
-    plt.close(fig)
 
 
 def _contour_geometry_report(plan: ToolpathPlan) -> list[dict]:

@@ -7,6 +7,7 @@ max_overcut_cells: 500
 max_undercut_cells: 800
 max_air_cut_moves: 380
 max_recut_cells: 45000
+camotics_operations: [op1, op10, op14, op44, op64]
 geometry:
   max_contour_offset_median_error: 0.003
   max_contour_offset_max_error: 0.06
