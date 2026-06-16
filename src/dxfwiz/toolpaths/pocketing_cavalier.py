@@ -366,7 +366,9 @@ def helical_pocket_operation_to_cavalier_toolpaths(
         moves = []
         rough_depths = _depth_passes(operation.depth, operation.roughing.depth_per_pass, tool.depth_per_pass)
         previous_depth = 0.0
-        for depth in rough_depths:
+        finish_follows = operation.finishing.enabled and operation.finishing.side and finish_paths
+        for index, depth in enumerate(rough_depths):
+            has_next_depth = index < len(rough_depths) - 1
             moves.extend(
                 _helical_pocket_moves(
                     center=rough_center,
@@ -378,8 +380,9 @@ def helical_pocket_operation_to_cavalier_toolpaths(
                     direction=direction,
                     safe_z=safe_z,
                     feed=feed,
-                    retract=True,
+                    retract=not (has_next_depth or finish_follows),
                     start_z=-previous_depth,
+                    enter_at_safe_z=index == 0,
                 )
             )
             previous_depth = depth
@@ -426,7 +429,7 @@ def helical_pocket_operation_to_cavalier_toolpaths(
                     direction,
                     safe_z,
                     feed,
-                    enter_at_safe_z=True,
+                    enter_at_safe_z=not passes,
                 ),
             )
         )

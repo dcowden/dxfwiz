@@ -362,8 +362,9 @@ def test_cavalier_real_circle_helical_pocket_is_a_helix():
     assert len(rough_arcs) >= 8
     assert len({round(move.z, 4) for move in rough_arcs}) > 2
     assert rough_arcs[-1].z == pytest.approx(passes[0].z_bottom)
-    assert passes[0].moves[-1].type == "rapid"
-    assert passes[1].moves[0].type == "rapid"
+    assert passes[0].moves[-1].type == "arc"
+    assert passes[1].moves[0].type == "line"
+    assert passes[1].moves[0].z == pytest.approx(passes[0].z_bottom)
     assert_arc_moves_are_geometrically_continuous(passes[0])
 
 

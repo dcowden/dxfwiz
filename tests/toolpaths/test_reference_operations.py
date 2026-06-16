@@ -222,14 +222,15 @@ def test_reference_operations_render_gcode_gallery_and_match_expected_metrics():
                 if move.type == "arc"
             }
             assert rough_bottom_arcs
-            assert len(rough_rapid_entries) == 2
+            assert len(rough_rapid_entries) == 1
             assert {-0.25, -0.32}.issubset(rough_arc_depths)
             assert finish_arc_depths == {-0.32}
             assert 0.345 in rough_arc_radii_at_depth
             assert finish_arc_radii == {0.425}
-            assert rough_pass.moves[-1].type == "rapid"
-            assert finish_pass.moves[0].type == "rapid"
-            assert finish_xy_lines == []
+            assert rough_pass.moves[-1].type == "arc"
+            assert finish_pass.moves[0].type == "line"
+            assert len(finish_xy_lines) == 1
+            assert finish_xy_lines[0].z == pytest.approx(rough_pass.z_bottom)
         if "square" in case.name:
             assert metrics.arc == 0
 

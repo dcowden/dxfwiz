@@ -169,7 +169,9 @@ def helical_pocket_operation_to_toolpaths(
         rough_depths = _depth_passes(operation.depth, operation.roughing.depth_per_pass, tool.depth_per_pass)
         rough_moves = []
         previous_depth = 0.0
-        for depth in rough_depths:
+        finish_follows = operation.finishing.enabled and operation.finishing.side
+        for index, depth in enumerate(rough_depths):
+            has_next_depth = index < len(rough_depths) - 1
             rough_moves.extend(
                 _helical_pocket_moves(
                     center=center,
@@ -181,8 +183,9 @@ def helical_pocket_operation_to_toolpaths(
                     direction=direction,
                     safe_z=safe_z,
                     feed=effective_feed,
-                    retract=True,
+                    retract=not (has_next_depth or finish_follows),
                     start_z=-previous_depth,
+                    enter_at_safe_z=index == 0,
                 )
             )
             previous_depth = depth
@@ -221,7 +224,7 @@ def helical_pocket_operation_to_toolpaths(
                     direction,
                     safe_z,
                     effective_feed,
-                    enter_at_safe_z=True,
+                    enter_at_safe_z=not rough_passes,
                 ),
             )
         )
@@ -284,9 +287,16 @@ def _helical_pocket_moves(
     feed: float,
     retract: bool = True,
     start_z: float = 0.0,
+    enter_at_safe_z: bool = True,
 ) -> list[dict]:
     radius = max(1e-6, first_radius)
-    moves = _helix_moves(center, radius, target_z, pitch, direction, safe_z, feed, start_z=start_z)
+    if enter_at_safe_z:
+        moves = _helix_moves(center, radius, target_z, pitch, direction, safe_z, feed, start_z=start_z)
+    else:
+        start_x = center[0] + radius
+        start_y = center[1]
+        moves = [{"type": "line", "x": start_x, "y": start_y, "z": start_z, "feed": feed}]
+        moves.extend(_helix_moves(center, radius, target_z, pitch, direction, safe_z, feed, start_z=start_z)[2:])
     if moves and moves[-1].get("type") == "rapid":
         moves.pop()
     current_xy = _current_xy_from_moves(moves, center, radius)
