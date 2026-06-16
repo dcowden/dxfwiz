@@ -3,8 +3,10 @@ from __future__ import annotations
 import math
 
 from shapely.geometry import LineString, MultiLineString, Polygon
+from shapely.ops import unary_union
 
 from dxfwiz.cam_kernel.cavalier import CavalierUnavailable, offset_source_path
+from dxfwiz.schemas.common import Point2D
 from dxfwiz.schemas.job import ContourOperation, HelicalContourOperation, HelicalPocketOperation, PocketOperation
 from dxfwiz.schemas.machine import Tool
 from dxfwiz.toolpaths.drilling import _finish_circle_moves, _helical_pocket_moves, _helix_moves
@@ -472,6 +474,9 @@ def _offset_clearing_pass(
     stepover = tool.diameter * operation.stepover_percent / 100
     levels = _inward_offset_levels(source_path, offset_distance, stepover)
     loops = [loop for level in levels for loop in level]
+    if levels:
+        loops.extend(_terminal_cleanup_paths(levels[-1], tool.diameter / 2))
+        loops.extend(_coverage_cleanup_paths(source_path, loops, offset_distance, tool.diameter / 2, stepover))
     return _path_set_pass(
         operation=operation,
         source_path=source_path,
@@ -599,6 +604,191 @@ def _inward_offset_levels(
         active = next_active
         distance = stepover
     return levels
+
+
+def _terminal_cleanup_paths(final_loops: list[SourcePath], cutter_radius: float) -> list[SourcePath]:
+    cleanup_paths: list[SourcePath] = []
+    for index, loop in enumerate(final_loops):
+        polygon = _source_path_polygon(loop)
+        if polygon is not None:
+            centerline = _terminal_centerline_cleanup_path(loop, index, polygon, cutter_radius)
+            if centerline is not None:
+                cleanup_paths.append(centerline)
+        residual = _terminal_residual_region(loop, cutter_radius)
+        if residual is None or residual.is_empty:
+            continue
+        polygons = [residual] if residual.geom_type == "Polygon" else list(getattr(residual, "geoms", []))
+        for polygon_index, polygon in enumerate(polygons):
+            if polygon.is_empty or polygon.area <= max(cutter_radius * cutter_radius * 1e-4, 1e-9):
+                continue
+            point = polygon.representative_point()
+            cleanup_paths.append(_point_cleanup_path(loop, index, polygon_index, (float(point.x), float(point.y))))
+    return cleanup_paths
+
+
+def _source_path_polygon(loop: SourcePath) -> Polygon | None:
+    points = source_path_points(loop, arc_segments=96)
+    if len(points) < 3:
+        return None
+    polygon = Polygon(points)
+    if not polygon.is_valid:
+        polygon = polygon.buffer(0)
+    if polygon.is_empty:
+        return None
+    return polygon
+
+
+def _terminal_centerline_cleanup_path(
+    source_path: SourcePath,
+    loop_index: int,
+    polygon: Polygon,
+    cutter_radius: float,
+) -> SourcePath | None:
+    min_x, min_y, max_x, max_y = polygon.bounds
+    point = polygon.representative_point()
+    cx = float(point.x)
+    cy = float(point.y)
+    margin = max(cutter_radius, 1e-6)
+    candidates = [
+        polygon.intersection(LineString([(min_x - margin, cy), (max_x + margin, cy)])),
+        polygon.intersection(LineString([(cx, min_y - margin), (cx, max_y + margin)])),
+    ]
+    lines = [line for candidate in candidates for line in _lines(candidate)]
+    if not lines:
+        return None
+    best = max(lines, key=lambda line: line.length)
+    if best.length <= max(cutter_radius * 0.25, 1e-6):
+        return None
+    coords = [(float(x), float(y)) for x, y in best.coords]
+    return _open_polyline_source_path(
+        f"{source_path.id}-terminal-centerline-{loop_index}",
+        source_path.entity,
+        [coords[0], coords[-1]],
+    )
+
+
+def _terminal_residual_region(loop: SourcePath, cutter_radius: float):
+    polygon = _source_path_polygon(loop)
+    if polygon is None:
+        return None
+    points = source_path_points(loop, arc_segments=96)
+    boundary = LineString([*points, points[0]])
+    swept = boundary.buffer(cutter_radius, cap_style=1, join_style=1)
+    return polygon.difference(swept)
+
+
+def _coverage_cleanup_paths(
+    source_path: SourcePath,
+    paths: list[SourcePath],
+    offset_distance: float,
+    cutter_radius: float,
+    stepover: float,
+) -> list[SourcePath]:
+    source = _source_path_polygon(source_path)
+    if source is None:
+        return []
+    center_region = source.buffer(-offset_distance, join_style=1)
+    if center_region.is_empty:
+        return []
+    target_material = center_region.buffer(cutter_radius, cap_style=1, join_style=1).intersection(source)
+    swept_regions = []
+    for path in paths:
+        line = _source_path_linestring(path)
+        if line is not None and line.length > 1e-9:
+            swept_regions.append(line.buffer(cutter_radius, cap_style=1, join_style=1))
+    if not swept_regions:
+        return []
+    swept_material = unary_union(swept_regions).buffer(max(cutter_radius * 0.01, 1e-5))
+    residual = target_material.difference(swept_material)
+    cleanup_paths: list[SourcePath] = []
+    min_area = max(cutter_radius * cutter_radius * 0.002, 1e-7)
+    cleanup_stepover = max(cutter_radius * 0.5, min(stepover, cutter_radius))
+    for index, polygon in enumerate(_polygons(residual)):
+        if polygon.area <= min_area:
+            continue
+        reachable_centers = center_region.intersection(polygon.buffer(cutter_radius, cap_style=1, join_style=1))
+        for segment_index, segment in enumerate(_cleanup_segments(reachable_centers, cleanup_stepover, cutter_radius)):
+            cleanup_paths.append(
+                _open_polyline_source_path(
+                    f"{source_path.id}-coverage-cleanup-{index}-{segment_index}",
+                    source_path.entity,
+                    segment,
+                )
+            )
+    return cleanup_paths
+
+
+def _source_path_linestring(path: SourcePath) -> LineString | None:
+    points = source_path_points(path, arc_segments=96)
+    if len(points) < 2:
+        return None
+    if path.closed and not _same_point(points[0], points[-1]):
+        points = [*points, points[0]]
+    return LineString(points)
+
+
+def _polygons(geometry) -> list[Polygon]:
+    if geometry.is_empty:
+        return []
+    if isinstance(geometry, Polygon):
+        return [geometry]
+    return [polygon for item in getattr(geometry, "geoms", []) for polygon in _polygons(item)]
+
+
+def _cleanup_segments(
+    geometry,
+    stepover: float,
+    cutter_radius: float,
+) -> list[list[tuple[float, float]]]:
+    segments: list[list[tuple[float, float]]] = []
+    min_length = max(cutter_radius * 0.25, 1e-6)
+    for polygon in _polygons(geometry):
+        polygon_segments: list[list[tuple[float, float]]] = []
+        for start, end in _raster_segments(polygon, stepover):
+            if math.hypot(end[0] - start[0], end[1] - start[1]) > min_length:
+                polygon_segments.append([start, end])
+        if polygon_segments:
+            segments.extend(polygon_segments)
+            continue
+        chord = _longest_axis_chord(polygon, cutter_radius)
+        if chord is not None:
+            segments.append(chord)
+    return segments
+
+
+def _longest_axis_chord(polygon: Polygon, cutter_radius: float) -> list[tuple[float, float]] | None:
+    min_x, min_y, max_x, max_y = polygon.bounds
+    point = polygon.representative_point()
+    cx = float(point.x)
+    cy = float(point.y)
+    margin = max(cutter_radius, 1e-6)
+    candidates = [
+        polygon.intersection(LineString([(min_x - margin, cy), (max_x + margin, cy)])),
+        polygon.intersection(LineString([(cx, min_y - margin), (cx, max_y + margin)])),
+    ]
+    lines = [line for candidate in candidates for line in _lines(candidate)]
+    if not lines:
+        return None
+    best = max(lines, key=lambda line: line.length)
+    if best.length <= max(cutter_radius * 0.25, 1e-6):
+        return None
+    coords = [(float(x), float(y)) for x, y in best.coords]
+    return [coords[0], coords[-1]]
+
+
+def _point_cleanup_path(
+    source_path: SourcePath,
+    loop_index: int,
+    point_index: int,
+    coords: tuple[float, float],
+) -> SourcePath:
+    point = Point2D(x=coords[0], y=coords[1])
+    return SourcePath(
+        id=f"{source_path.id}-terminal-cleanup-{loop_index}-{point_index}",
+        entity=source_path.entity,
+        closed=False,
+        segments=[SourceLineSegment(type="line", start=point, end=point)],
+    )
 
 
 def _linked_source_path_moves(

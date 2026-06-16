@@ -128,6 +128,12 @@ ISSUES: dict[str, IssueDefinition] = {
         title="AI planner failed",
         description="The AI planner failed to return a usable plan.",
     ),
+    "E3004": IssueDefinition(
+        code="E3004",
+        level="error",
+        title="G-code validation failed",
+        description="Posted G-code failed semantic validation against the neutral toolpath plan.",
+    ),
 }
 
 
@@ -146,6 +152,7 @@ LEGACY_CODE_MAP = {
     "invalid_default_tool_replaced": "W2009",
     "ai_planner_fell_back_to_local": "W2010",
     "toolpath_generation_failed": "E3002",
+    "gcode_validation_failed": "E3004",
     "missing_gemini_api_key": "E3003",
     "ai_planner_error": "E3003",
     "missing_ai_plan": "E3003",

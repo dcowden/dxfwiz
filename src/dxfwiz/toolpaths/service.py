@@ -62,6 +62,7 @@ def generate_toolpaths(request: ToolpathRequest) -> ToolpathResponse:
         ToolpathIssue(code=classify_toolpath_warning(message), message=message)
         for message in plan.warnings
     ]
+    issues.extend(_gcode_validation_issues(gcode, plan, request.machine.machine.clear_z))
     return ToolpathResponse(
         errors=[issue for issue in issues if issue.code.startswith("E")],
         warnings=[issue for issue in issues if issue.code.startswith("W")],
@@ -69,6 +70,17 @@ def generate_toolpaths(request: ToolpathRequest) -> ToolpathResponse:
         gcode=gcode,
         gcode_files=gcode_files,
     )
+
+
+def _gcode_validation_issues(gcode: str, plan: ToolpathPlan, safe_z: float) -> list[ToolpathIssue]:
+    from dxfwiz.gcode.validation import validate_gcode_against_plan
+
+    result: list[ToolpathIssue] = []
+    for issue in validate_gcode_against_plan(gcode, plan, safe_z=safe_z, tolerance=0.002):
+        code = issue_code("gcode_validation_failed") if issue.severity == "error" else "W1002"
+        location = f"line {issue.line_no}: " if issue.line_no is not None else ""
+        result.append(ToolpathIssue(code=code, message=f"{location}{issue.message}"))
+    return result
 
 
 def _split_gcode_files_by_tool(request: ToolpathRequest, plan: ToolpathPlan, post: UccncPost) -> dict[str, str]:

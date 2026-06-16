@@ -279,6 +279,7 @@ def _helical_pocket_moves(
         moves.pop()
     current_xy = _current_xy_from_moves(moves, center, radius)
     start_angle = math.atan2(current_xy[1] - center[1], current_xy[0] - center[0])
+    moves.append(_full_circle_arc_from_start(center, current_xy, target_z, direction, feed))
     spiral_moves = _spiral_out_arc_moves(
         center=center,
         start_radius=radius,

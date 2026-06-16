@@ -373,7 +373,7 @@ def test_cavalier_helical_drill_into_pocket_has_no_spiral_start_barb():
     assert_arc_moves_are_geometrically_continuous(passes[0])
     metrics = path_efficiency_metrics(source_path, passes, _ideal_ratio(operation.stepover_percent))
     assert metrics.paths_per_z_level == 1
-    assert metrics.adjusted_ratio == pytest.approx(1.0, abs=0.05)
+    assert metrics.adjusted_ratio == pytest.approx(1.29, abs=0.05)
     rendered_arc_segments = [
         points for kind, points in _toolpath_render_segments(passes[0])
         if kind == "arc" and abs(points[0][2] - points[-1][2]) > 1e-6
