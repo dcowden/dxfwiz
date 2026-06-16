@@ -10,6 +10,7 @@ readme = "prompt.md"
 requires-python = ">=3.13"
 dependencies = [
     "ezdxf>=1.4",
+    "fastapi>=0.115",
     "instructor==1.15.1",
     "litellm==1.87.1",
     "matplotlib>=3.9",
@@ -23,6 +24,9 @@ dependencies = [
 [project.optional-dependencies]
 dev = [
     "pytest>=8.2",
+]
+native = [
+    "maturin>=1.8,<2.0",
 ]
 
 [tool.pytest.ini_options]
