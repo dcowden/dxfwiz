@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import base64
 import math
+import os
 import re
 import shutil
 import struct
 import subprocess
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from collections import Counter
 from dataclasses import dataclass
 from html import escape
@@ -930,32 +932,71 @@ def _generate_camotics_simulations(artifacts: dict[str, ReferenceArtifacts]) -> 
     if camsim is None:
         return {}
     analyses: dict[str, CamoticsAnalysis] = {}
-    for case in _reference_cases():
-        if not case.camotics:
-            continue
+    cases = [case for case in _reference_cases() if case.camotics]
+    threads = _camotics_thread_count()
+    jobs = _camotics_job_count()
+    with ThreadPoolExecutor(max_workers=jobs) as executor:
+        futures = {
+            executor.submit(_run_camotics_simulation, camsim, artifacts[case.name], threads): case
+            for case in cases
+        }
+        for future in as_completed(futures):
+            future.result()
+    for case in cases:
         artifact = artifacts[case.name]
-        subprocess.run(
-            [
-                str(camsim),
-                "--binary",
-                "--resolution",
-                str(CAMOTICS_RESOLUTION_MM),
-                "--threads",
-                "4",
-                artifact.project_path.name,
-                artifact.stl_path.name,
-            ],
-            cwd=artifact.output_dir,
-            check=True,
-            capture_output=True,
-            text=True,
-            timeout=120,
-        )
         mesh = _load_camotics_stl(artifact.stl_path)
         analysis = _analyze_camotics_stl(case, mesh)
         _render_camotics_png(case, artifact.png_path, analysis)
         analyses[artifact.slug] = analysis
     return analyses
+
+
+def _run_camotics_simulation(camsim: Path, artifact: ReferenceArtifacts, threads: int) -> None:
+    subprocess.run(
+        [
+            str(camsim),
+            "--binary",
+            "--resolution",
+            str(CAMOTICS_RESOLUTION_MM),
+            "--threads",
+            str(threads),
+            artifact.project_path.name,
+            artifact.stl_path.name,
+        ],
+        cwd=artifact.output_dir,
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=_camotics_timeout_seconds(),
+    )
+
+
+def _camotics_thread_count() -> int:
+    return _positive_env_int("DXFWIZ_CAMOTICS_THREADS", 6)
+
+
+def _camotics_job_count() -> int:
+    return _positive_env_int("DXFWIZ_CAMOTICS_JOBS", _default_camotics_job_count())
+
+
+def _default_camotics_job_count() -> int:
+    logical_cores = os.cpu_count() or 1
+    return max(1, logical_cores - 2)
+
+
+def _camotics_timeout_seconds() -> int:
+    return _positive_env_int("DXFWIZ_CAMOTICS_TIMEOUT_SECONDS", 600)
+
+
+def _positive_env_int(name: str, default: int) -> int:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    try:
+        parsed = int(value)
+    except ValueError:
+        return default
+    return max(1, parsed)
 
 
 def _load_camotics_stl(stl_path: Path) -> CamoticsMesh:

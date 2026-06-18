@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import json
 import math
+import os
 import re
 import shutil
 import struct
@@ -134,7 +135,7 @@ def run_camotics_material_validation(
                 "--resolution",
                 str(CAMOTICS_RESOLUTION_MM),
             "--threads",
-            "4",
+            str(_camotics_thread_count()),
             artifacts.project_path.name,
             artifacts.stl_path.name,
         ],
@@ -150,6 +151,16 @@ def run_camotics_material_validation(
     render_camotics_png(name, artifacts.png_path, stock_bounds, expected_regions, analysis)
     render_camotics_html(name, artifacts, analysis)
     return artifacts, analysis
+
+
+def _camotics_thread_count() -> int:
+    value = os.environ.get("DXFWIZ_CAMOTICS_THREADS")
+    if value is None:
+        return 6
+    try:
+        return max(1, int(value))
+    except ValueError:
+        return 4
 
 
 def find_camsim() -> Path | None:
