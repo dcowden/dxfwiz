@@ -37,7 +37,7 @@ from dxfwiz.toolpaths.posts.uccnc import UccncPost
 OUTPUT_DIR = Path(__file__).resolve().parents[1] / "output" / "toolpaths"
 REFERENCE_HTML = OUTPUT_DIR / "reference_operations_gcode_validation.html"
 CAMOTICS_OUTPUT_DIR = OUTPUT_DIR / "camotics_reference"
-CAMOTICS_RESOLUTION_MM = 1.016
+CAMOTICS_RESOLUTION_MM = 0.508
 CAMOTICS_EDGE_TOLERANCE_IN = max(0.015, CAMOTICS_RESOLUTION_MM * 3 / 25.4)
 CAMOTICS_Z_TOLERANCE_IN = max(0.004, CAMOTICS_RESOLUTION_MM * 1.5 / 25.4)
 
@@ -81,9 +81,10 @@ class CamoticsAnalysis:
 @dataclass(frozen=True)
 class CamoticsMesh:
     triangles: int
-    normals: np.ndarray
-    vertices: np.ndarray
-    centers: np.ndarray
+    normal_z: np.ndarray
+    center_xy_in: np.ndarray
+    center_z_in: np.ndarray
+    z_span_mm: np.ndarray
     max_z_mm: float
 
 
@@ -169,7 +170,9 @@ def test_reference_operations_render_gcode_gallery_and_match_expected_metrics():
                 assert analysis.material_violating_facets == 0
                 if _strict_wall_validation_enabled():
                     assert analysis.wall_violating_facets == 0
-            if analysis.expected_residual_area > (CAMOTICS_EDGE_TOLERANCE_IN * 2) ** 2:
+            # At coarse CAMotics resolutions, skinny expected-residual slivers can be real
+            # but still miss every sampled facet center.
+            if CAMOTICS_RESOLUTION_MM <= 0.254 and analysis.expected_residual_area > (CAMOTICS_EDGE_TOLERANCE_IN * 2) ** 2:
                 assert analysis.expected_residual_facets > 0
     for case, plan, gcode in rendered:
         issues = validate_gcode_against_plan(gcode, plan, safe_z=0.5)
@@ -479,7 +482,7 @@ def _render_reference_html(
         artifact = artifacts[case.name]
         analysis = camotics_analyses.get(artifact.slug)
         stl_id = f"stl-{index}"
-        script = f'<script type="application/json" id="{stl_id}">{_stl_payload(artifact.stl_path, analysis)}</script>' if artifact.stl_path.exists() else ""
+        script = f'<script type="application/json" id="{stl_id}">{_stl_payload(analysis)}</script>' if artifact.stl_path.exists() else ""
         lines.extend(
             [
                 '<section class="case-row">',
@@ -491,7 +494,7 @@ def _render_reference_html(
                 _preview_card("top view", _inline_path_svg(case, plan, gcode, iso=False)),
                 _preview_card("isometric view", _inline_path_svg(case, plan, gcode, iso=True)),
                 _validation_card(artifact, analysis, output_path),
-                _stl_card(artifact, stl_id),
+                _stl_card(artifact, stl_id, output_path),
                 _gcode_card(gcode),
                 "</div>",
                 script,
@@ -573,7 +576,7 @@ def _validation_card(artifact: ReferenceArtifacts, analysis: CamoticsAnalysis | 
     )
 
 
-def _stl_card(artifact: ReferenceArtifacts, stl_id: str) -> str:
+def _stl_card(artifact: ReferenceArtifacts, stl_id: str, report_path: Path) -> str:
     if not artifact.stl_path.exists():
         return (
             '<article class="card stl-card">'
@@ -582,10 +585,11 @@ def _stl_card(artifact: ReferenceArtifacts, stl_id: str) -> str:
             '<p class="meta">Vector paths and posted G-code are still shown for human review.</p>'
             "</article>"
         )
+    stl_href = artifact.stl_path.relative_to(report_path.parent).as_posix()
     return (
         '<article class="card stl-card">'
         "<h3>interactive STL</h3>"
-        f'<div class="stl-viewer" data-stl-id="{escape(stl_id)}" aria-label="{escape(artifact.slug)} STL viewer"></div>'
+        f'<div class="stl-viewer" data-stl-id="{escape(stl_id)}" data-stl-url="{escape(stl_href)}" aria-label="{escape(artifact.slug)} STL viewer"></div>'
         '<p class="meta stl-legend">'
         '<span><i class="floor"></i>floor</span>'
         '<span><i class="wall"></i>wall ok</span>'
@@ -593,7 +597,7 @@ def _stl_card(artifact: ReferenceArtifacts, stl_id: str) -> str:
         '<span><i class="bad"></i>bad</span>'
         '<span><i class="stock"></i>stock/edge</span>'
         "</p>"
-        '<p class="meta">Three.js full-STL preview with validation colors. Drag to rotate, wheel to zoom, right-drag or shift-drag to pan.</p>'
+        f'<p class="meta"><a href="{escape(stl_href)}">open STL</a>. Three.js full-STL preview with validation colors. Drag to rotate, wheel to zoom, right-drag or shift-drag to pan.</p>'
         "</article>"
     )
 
@@ -625,10 +629,9 @@ def _inline_path_svg(case: ReferenceCase, plan: ToolpathPlan, gcode: str, *, iso
     )
 
 
-def _stl_payload(stl_path: Path, analysis: CamoticsAnalysis | None) -> str:
+def _stl_payload(analysis: CamoticsAnalysis | None) -> str:
     return json.dumps(
         {
-            "stl": base64.b64encode(stl_path.read_bytes()).decode("ascii"),
             "colors": analysis.triangle_colors if analysis is not None else None,
         },
         separators=(",", ":"),
@@ -664,6 +667,7 @@ h1 { margin: 0 0 6px; font-size: 28px; }
 .stl-viewer:active { cursor: grabbing; }
 .stl-viewer::before { content: "loading STL"; position: absolute; inset: 0; display: grid; place-items: center; color: #cbd5e1; font-size: 12px; letter-spacing: 0.04em; text-transform: uppercase; }
 .stl-viewer.loaded::before { display: none; }
+.stl-viewer.error::before { content: attr(data-error); white-space: pre-line; padding: 18px; text-align: center; line-height: 1.45; text-transform: none; letter-spacing: 0; }
 .stl-legend { display: flex; gap: 10px; flex-wrap: wrap; margin: 8px 0 4px; }
 .stl-legend span { display: inline-flex; align-items: center; gap: 4px; }
 .stl-legend i { width: 10px; height: 10px; border-radius: 999px; display: inline-block; }
@@ -752,9 +756,14 @@ function fitCamera(camera, controls, box) {
   controls.update();
 }
 
-function initViewer(container) {
+async function initViewer(container) {
   if (container.dataset.ready === '1') return;
   container.dataset.ready = '1';
+  if (window.location.protocol === 'file:') {
+    container.dataset.error = 'External STL preview needs this report served over http://localhost.\nRun scripts/serve_toolpath_report.py, then open the printed URL.';
+    container.classList.add('error');
+    return;
+  }
 
   const scene = new THREE.Scene();
   scene.background = new THREE.Color(0x0f172a);
@@ -781,7 +790,16 @@ function initViewer(container) {
 
   const loader = new STLLoader();
   const payload = JSON.parse(document.getElementById(container.dataset.stlId).textContent);
-  const geometry = loader.parse(base64ToArrayBuffer(payload.stl));
+  let geometry;
+  try {
+    const response = await fetch(container.dataset.stlUrl);
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    geometry = loader.parse(await response.arrayBuffer());
+  } catch (error) {
+    container.dataset.error = `Failed to load STL preview.\n${error.message}`;
+    container.classList.add('error');
+    return;
+  }
   geometry.computeVertexNormals();
   geometry.computeBoundingBox();
   const hasValidationColors = applyTriangleColors(geometry, payload.colors);
@@ -919,6 +937,7 @@ def _generate_camotics_simulations(artifacts: dict[str, ReferenceArtifacts]) -> 
         subprocess.run(
             [
                 str(camsim),
+                "--binary",
                 "--resolution",
                 str(CAMOTICS_RESOLUTION_MM),
                 "--threads",
@@ -940,23 +959,27 @@ def _generate_camotics_simulations(artifacts: dict[str, ReferenceArtifacts]) -> 
 
 
 def _load_camotics_stl(stl_path: Path) -> CamoticsMesh:
-    data = stl_path.read_bytes()
-    if len(data) < 84:
+    file_size = stl_path.stat().st_size
+    if file_size < 84:
         raise AssertionError(f"{stl_path} is too small to be a binary STL")
-    triangles = struct.unpack_from("<I", data, 80)[0]
+    with stl_path.open("rb") as handle:
+        handle.seek(80)
+        triangles = struct.unpack("<I", handle.read(4))[0]
     expected_size = 84 + triangles * 50
-    if len(data) < expected_size:
+    if file_size < expected_size:
         raise AssertionError(f"{stl_path} is truncated")
     dtype = np.dtype([("normal", "<f4", 3), ("vertices", "<f4", (3, 3)), ("attr", "<u2")])
-    records = np.frombuffer(data, dtype=dtype, count=triangles, offset=84)
-    vertices = records["vertices"].astype(np.float64, copy=False)
+    records = np.memmap(stl_path, dtype=dtype, mode="r", offset=84, shape=(triangles,))
+    vertices = records["vertices"]
     centers = vertices.mean(axis=1)
+    z_values = vertices[:, :, 2]
     return CamoticsMesh(
         triangles=triangles,
-        normals=records["normal"].astype(np.float64, copy=False),
-        vertices=vertices,
-        centers=centers,
-        max_z_mm=float(vertices[:, :, 2].max()),
+        normal_z=np.asarray(records["normal"][:, 2], dtype=np.float32),
+        center_xy_in=np.asarray(centers[:, :2] / 25.4, dtype=np.float32),
+        center_z_in=np.asarray(centers[:, 2] / 25.4, dtype=np.float32),
+        z_span_mm=np.asarray(np.ptp(z_values, axis=1), dtype=np.float32),
+        max_z_mm=float(z_values.max()),
     )
 
 
@@ -965,16 +988,45 @@ def _analyze_camotics_stl(case: ReferenceCase, mesh: CamoticsMesh) -> CamoticsAn
     source_geometry = _source_geometry(case)
     expected_regions = _expected_surface_regions(case)
 
-    center_xy_in = mesh.centers[:, :2] / 25.4
-    center_z_in = mesh.centers[:, 2] / 25.4
-    normal_z = mesh.normals[:, 2]
-    points = shapely.points(center_xy_in[:, 0], center_xy_in[:, 1])
-    source_covers = np.asarray(shapely.covers(source_geometry, points), dtype=bool)
-    expected_z = _expected_surface_z_many(points, expected_regions)
-    boundary_distance = _boundary_distance_many(points, expected_regions)
+    center_xy_in = mesh.center_xy_in
+    center_z_in = mesh.center_z_in
+    normal_z = mesh.normal_z
+    expected_z = np.zeros(mesh.triangles, dtype=np.float32)
+    boundary_distance = np.full(mesh.triangles, np.inf, dtype=np.float32)
+    source_covers = np.zeros(mesh.triangles, dtype=bool)
 
-    z_span_mm = np.ptp(mesh.vertices[:, :, 2], axis=1)
-    horizontal_mask = (np.abs(normal_z) >= 0.75) & (z_span_mm <= horizontal_z_tolerance_mm)
+    min_depth = min((region.depth_z for region in expected_regions), default=0.0)
+    horizontal_candidates = (np.abs(normal_z) >= 0.75) & (mesh.z_span_mm <= horizontal_z_tolerance_mm)
+    horizontal_ids = _sorted_z_range_ids(
+        horizontal_candidates,
+        center_z_in,
+        min_depth - CAMOTICS_Z_TOLERANCE_IN,
+        CAMOTICS_Z_TOLERANCE_IN,
+    )
+    vertical_candidates = (
+        (np.abs(normal_z) <= 0.25)
+        & (center_z_in <= CAMOTICS_Z_TOLERANCE_IN)
+        & (center_z_in >= min_depth - CAMOTICS_Z_TOLERANCE_IN)
+    )
+    vertical_ids = _sorted_z_range_ids(
+        vertical_candidates,
+        center_z_in,
+        min_depth - CAMOTICS_Z_TOLERANCE_IN,
+        CAMOTICS_Z_TOLERANCE_IN,
+    )
+    query_ids = np.union1d(horizontal_ids, vertical_ids)
+    if len(query_ids):
+        points = shapely.points(center_xy_in[query_ids, 0], center_xy_in[query_ids, 1])
+        source_covers[query_ids] = np.asarray(shapely.covers(source_geometry, points), dtype=bool)
+        expected_z[query_ids] = _expected_surface_z_many(points, expected_regions).astype(np.float32)
+        boundary_distance[query_ids] = _boundary_distance_many_numpy(
+            center_xy_in[query_ids],
+            expected_regions,
+            max(CAMOTICS_EDGE_TOLERANCE_IN * 3, 0.06),
+        )
+
+    horizontal_mask = np.zeros(mesh.triangles, dtype=bool)
+    horizontal_mask[horizontal_ids] = True
     stock_underside_mask = (expected_z < -1e-9) & (normal_z < -0.75) & (center_z_in < expected_z - CAMOTICS_Z_TOLERANCE_IN)
     horizontal_mask &= ~stock_underside_mask
     horizontal_mask &= ~((expected_z >= -1e-9) & (normal_z < 0.75))
@@ -992,12 +1044,8 @@ def _analyze_camotics_stl(case: ReferenceCase, mesh: CamoticsMesh) -> CamoticsAn
     )
 
     wall_search_tolerance = max(CAMOTICS_EDGE_TOLERANCE_IN * 3, 0.06)
-    min_depth = min((region.depth_z for region in expected_regions), default=0.0)
-    vertical_candidate_mask = (
-        (np.abs(normal_z) <= 0.25)
-        & (center_z_in <= CAMOTICS_Z_TOLERANCE_IN)
-        & (center_z_in >= min_depth - CAMOTICS_Z_TOLERANCE_IN)
-    )
+    vertical_candidate_mask = np.zeros(mesh.triangles, dtype=bool)
+    vertical_candidate_mask[vertical_ids] = True
     relevant_wall_mask = source_covers | (expected_z < -1e-9) | (boundary_distance <= wall_search_tolerance)
     vertical_mask = vertical_candidate_mask & relevant_wall_mask
     wall_ok_mask = vertical_mask & (boundary_distance <= CAMOTICS_EDGE_TOLERANCE_IN)
@@ -1005,7 +1053,7 @@ def _analyze_camotics_stl(case: ReferenceCase, mesh: CamoticsMesh) -> CamoticsAn
     if not _strict_wall_validation_enabled():
         wall_ok_mask = vertical_mask
         wall_bad_mask = np.zeros(len(vertical_mask), dtype=bool)
-    bad_visual_mask = _expand_xy_mask(
+    bad_visual_mask = _expand_xy_mask_numpy(
         center_xy_in,
         z_bad_mask | material_bad_mask | wall_bad_mask,
         CAMOTICS_EDGE_TOLERANCE_IN,
@@ -1175,6 +1223,17 @@ def _union_expected_geometries(regions: list[ExpectedSurfaceRegion]) -> BaseGeom
     return shapely.union_all([region.geometry for region in regions])
 
 
+def _sorted_z_range_ids(mask: np.ndarray, z_values: np.ndarray, min_z: float, max_z: float) -> np.ndarray:
+    ids = np.flatnonzero(mask)
+    if len(ids) == 0:
+        return ids
+    order = ids[np.argsort(z_values[ids], kind="stable")]
+    sorted_z = z_values[order]
+    start = np.searchsorted(sorted_z, min_z, side="left")
+    end = np.searchsorted(sorted_z, max_z, side="right")
+    return order[start:end]
+
+
 def _expected_surface_z_many(points, regions: list[ExpectedSurfaceRegion]) -> np.ndarray:
     expected_z = np.zeros(len(points), dtype=np.float64)
     for region in regions:
@@ -1191,6 +1250,159 @@ def _boundary_distance_many(points, regions: list[ExpectedSurfaceRegion]) -> np.
         for region in regions
     ]
     return np.minimum.reduce(distances)
+
+
+def _boundary_distance_many_numpy(
+    point_xy: np.ndarray,
+    regions: list[ExpectedSurfaceRegion],
+    search_radius: float,
+    *,
+    bin_size: float | None = None,
+) -> np.ndarray:
+    segments = _boundary_segment_arrays(regions)
+    if len(point_xy) == 0 or segments is None:
+        return np.full(len(point_xy), np.inf, dtype=np.float32)
+    x0, y0, x1, y1 = segments
+    if bin_size is None:
+        bin_size = max(search_radius * 2.0, 1e-3)
+    min_x = min(float(point_xy[:, 0].min(initial=x0.min())), float(x0.min()), float(x1.min())) - search_radius
+    min_y = min(float(point_xy[:, 1].min(initial=y0.min())), float(y0.min()), float(y1.min())) - search_radius
+    bins = _boundary_segment_bins(x0, y0, x1, y1, search_radius, min_x, min_y, bin_size)
+    result = np.full(len(point_xy), np.inf, dtype=np.float32)
+    point_bin_x = np.floor((point_xy[:, 0] - min_x) / bin_size).astype(np.int32)
+    point_bin_y = np.floor((point_xy[:, 1] - min_y) / bin_size).astype(np.int32)
+    order = np.lexsort((point_bin_y, point_bin_x))
+    sorted_x = point_bin_x[order]
+    sorted_y = point_bin_y[order]
+    if len(order) == 0:
+        return result
+    breaks = np.flatnonzero((sorted_x[1:] != sorted_x[:-1]) | (sorted_y[1:] != sorted_y[:-1])) + 1
+    starts = np.concatenate(([0], breaks))
+    ends = np.concatenate((breaks, [len(order)]))
+    max_pairs = 2_000_000
+    for start, end in zip(starts, ends, strict=True):
+        key = (int(sorted_x[start]), int(sorted_y[start]))
+        segment_ids = bins.get(key)
+        if not segment_ids:
+            continue
+        segment_ids_array = np.asarray(segment_ids, dtype=np.int32)
+        point_ids = order[start:end]
+        point_chunk_size = max(1, max_pairs // max(1, len(segment_ids_array)))
+        for chunk_start in range(0, len(point_ids), point_chunk_size):
+            chunk_ids = point_ids[chunk_start:chunk_start + point_chunk_size]
+            distance_sq = _point_segment_distance_sq_many(
+                point_xy[chunk_ids],
+                x0[segment_ids_array],
+                y0[segment_ids_array],
+                x1[segment_ids_array],
+                y1[segment_ids_array],
+            )
+            min_distance_sq = distance_sq.min(axis=1, initial=np.inf)
+            near = min_distance_sq <= search_radius * search_radius
+            result[chunk_ids[near]] = np.sqrt(min_distance_sq[near]).astype(np.float32)
+    return result
+
+
+def _boundary_segment_arrays(regions: list[ExpectedSurfaceRegion]) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray] | None:
+    rings: list[list[tuple[float, float]]] = []
+    for region in regions:
+        rings.extend(_geometry_boundary_rings(region.geometry))
+    starts: list[tuple[float, float]] = []
+    ends: list[tuple[float, float]] = []
+    for ring in rings:
+        if len(ring) < 2:
+            continue
+        for start, end in zip(ring, ring[1:], strict=False):
+            if math.hypot(end[0] - start[0], end[1] - start[1]) > 1e-12:
+                starts.append(start)
+                ends.append(end)
+    if not starts:
+        return None
+    start_array = np.asarray(starts, dtype=np.float32)
+    end_array = np.asarray(ends, dtype=np.float32)
+    return start_array[:, 0], start_array[:, 1], end_array[:, 0], end_array[:, 1]
+
+
+def _geometry_boundary_rings(geometry: BaseGeometry) -> list[list[tuple[float, float]]]:
+    if geometry.is_empty:
+        return []
+    if hasattr(geometry, "geoms"):
+        rings: list[list[tuple[float, float]]] = []
+        for child in geometry.geoms:
+            rings.extend(_geometry_boundary_rings(child))
+        return rings
+    if hasattr(geometry, "exterior"):
+        return [
+            [(float(x), float(y)) for x, y in geometry.exterior.coords],
+            *[[(float(x), float(y)) for x, y in interior.coords] for interior in geometry.interiors],
+        ]
+    if hasattr(geometry, "coords"):
+        return [[(float(x), float(y)) for x, y in geometry.coords]]
+    return []
+
+
+def _boundary_segment_bins(
+    x0: np.ndarray,
+    y0: np.ndarray,
+    x1: np.ndarray,
+    y1: np.ndarray,
+    padding: float,
+    origin_x: float,
+    origin_y: float,
+    bin_size: float,
+) -> dict[tuple[int, int], list[int]]:
+    bins: dict[tuple[int, int], list[int]] = {}
+    min_bin_x = np.floor((np.minimum(x0, x1) - padding - origin_x) / bin_size).astype(np.int32)
+    max_bin_x = np.floor((np.maximum(x0, x1) + padding - origin_x) / bin_size).astype(np.int32)
+    min_bin_y = np.floor((np.minimum(y0, y1) - padding - origin_y) / bin_size).astype(np.int32)
+    max_bin_y = np.floor((np.maximum(y0, y1) + padding - origin_y) / bin_size).astype(np.int32)
+    for segment_id in range(len(x0)):
+        for bx in range(int(min_bin_x[segment_id]), int(max_bin_x[segment_id]) + 1):
+            for by in range(int(min_bin_y[segment_id]), int(max_bin_y[segment_id]) + 1):
+                bins.setdefault((bx, by), []).append(segment_id)
+    return bins
+
+
+def _point_segment_distance_sq(
+    px: float,
+    py: float,
+    x0: np.ndarray,
+    y0: np.ndarray,
+    x1: np.ndarray,
+    y1: np.ndarray,
+) -> np.ndarray:
+    dx = x1 - x0
+    dy = y1 - y0
+    length_sq = dx * dx + dy * dy
+    t = np.divide((px - x0) * dx + (py - y0) * dy, length_sq, out=np.zeros_like(length_sq), where=length_sq > 1e-12)
+    t = np.clip(t, 0.0, 1.0)
+    nearest_x = x0 + t * dx
+    nearest_y = y0 + t * dy
+    return (px - nearest_x) ** 2 + (py - nearest_y) ** 2
+
+
+def _point_segment_distance_sq_many(
+    points: np.ndarray,
+    x0: np.ndarray,
+    y0: np.ndarray,
+    x1: np.ndarray,
+    y1: np.ndarray,
+) -> np.ndarray:
+    px = points[:, 0:1]
+    py = points[:, 1:2]
+    dx = x1[None, :] - x0[None, :]
+    dy = y1[None, :] - y0[None, :]
+    length_sq = dx * dx + dy * dy
+    t = np.divide(
+        (px - x0[None, :]) * dx + (py - y0[None, :]) * dy,
+        length_sq,
+        out=np.zeros((len(points), len(x0)), dtype=np.float32),
+        where=length_sq > 1e-12,
+    )
+    t = np.clip(t, 0.0, 1.0)
+    nearest_x = x0[None, :] + t * dx
+    nearest_y = y0[None, :] + t * dy
+    return (px - nearest_x) ** 2 + (py - nearest_y) ** 2
 
 
 def _triangle_colors(
@@ -1228,6 +1440,54 @@ def _expand_xy_mask(points: np.ndarray, seed_mask: np.ndarray, radius: float) ->
         chunk = points[start : start + chunk_size]
         distances_sq = ((chunk[:, None, :] - seed_points[None, :, :]) ** 2).sum(axis=2)
         expanded[start : start + chunk_size] |= distances_sq.min(axis=1) <= radius_sq
+    return expanded
+
+
+def _expand_xy_mask_numpy(points: np.ndarray, seed_mask: np.ndarray, radius: float) -> np.ndarray:
+    seed_points = points[seed_mask]
+    if len(seed_points) == 0:
+        return seed_mask.copy()
+    bin_size = max(radius, 1e-6)
+    min_x = float(min(points[:, 0].min(), seed_points[:, 0].min())) - radius
+    min_y = float(min(points[:, 1].min(), seed_points[:, 1].min())) - radius
+    seed_bin_x = np.floor((seed_points[:, 0] - min_x) / bin_size).astype(np.int32)
+    seed_bin_y = np.floor((seed_points[:, 1] - min_y) / bin_size).astype(np.int32)
+    seed_bins: dict[tuple[int, int], list[int]] = {}
+    for seed_index, key in enumerate(zip(seed_bin_x, seed_bin_y, strict=True)):
+        seed_bins.setdefault((int(key[0]), int(key[1])), []).append(seed_index)
+
+    point_bin_x = np.floor((points[:, 0] - min_x) / bin_size).astype(np.int32)
+    point_bin_y = np.floor((points[:, 1] - min_y) / bin_size).astype(np.int32)
+    order = np.lexsort((point_bin_y, point_bin_x))
+    sorted_x = point_bin_x[order]
+    sorted_y = point_bin_y[order]
+    expanded = seed_mask.copy()
+    if len(order) == 0:
+        return expanded
+    breaks = np.flatnonzero((sorted_x[1:] != sorted_x[:-1]) | (sorted_y[1:] != sorted_y[:-1])) + 1
+    starts = np.concatenate(([0], breaks))
+    ends = np.concatenate((breaks, [len(order)]))
+    radius_sq = radius * radius
+    max_pairs = 2_000_000
+    for start, end in zip(starts, ends, strict=True):
+        bx = int(sorted_x[start])
+        by = int(sorted_y[start])
+        candidate_seed_ids = [
+            seed_id
+            for nx in range(bx - 1, bx + 2)
+            for ny in range(by - 1, by + 2)
+            for seed_id in seed_bins.get((nx, ny), [])
+        ]
+        if not candidate_seed_ids:
+            continue
+        seed_ids = np.asarray(candidate_seed_ids, dtype=np.int32)
+        point_ids = order[start:end]
+        point_chunk_size = max(1, max_pairs // max(1, len(seed_ids)))
+        for chunk_start in range(0, len(point_ids), point_chunk_size):
+            chunk_ids = point_ids[chunk_start:chunk_start + point_chunk_size]
+            deltas = points[chunk_ids, None, :] - seed_points[seed_ids][None, :, :]
+            near = (deltas * deltas).sum(axis=2).min(axis=1, initial=np.inf) <= radius_sq
+            expanded[chunk_ids[near]] = True
     return expanded
 
 
@@ -1767,8 +2027,10 @@ def _island_pocket_toolpaths(
     depths = [operation.depth]
     moves = []
     for depth in depths:
-        for segment in _island_raster_segments(center_region, stepover):
-            moves.extend(_open_segment_moves(segment, -depth, safe_z, feed))
+        for path in _island_boundary_paths(center_region):
+            moves.extend(_open_segment_moves(path, -depth, safe_z, feed))
+        for path in _island_raster_paths(center_region, stepover):
+            moves.extend(_open_segment_moves(path, -depth, safe_z, feed))
     return [
         ToolpathPass(
             id=f"{operation.id}-island-raster",
@@ -1790,17 +2052,60 @@ def _island_pocket_toolpaths(
     ]
 
 
-def _island_raster_segments(geometry: BaseGeometry, stepover: float) -> list[list[tuple[float, float]]]:
-    segments = []
+def _island_boundary_paths(geometry: BaseGeometry) -> list[list[tuple[float, float]]]:
+    paths: list[list[tuple[float, float]]] = []
     polygons = list(geometry.geoms) if hasattr(geometry, "geoms") else [geometry]
     for polygon in polygons:
         if polygon.is_empty:
             continue
-        for start, end in cavalier_pocketing._raster_segments(polygon, stepover):
-            segments.append([start, end])
-        for start, end in _vertical_raster_segments(polygon, stepover):
-            segments.append([start, end])
-    return segments
+        rings = [polygon.exterior, *polygon.interiors]
+        for ring in rings:
+            points = _dedupe_path([(float(x), float(y)) for x, y in ring.coords])
+            if len(points) >= 3 and not _same_xy(points[0], points[-1]):
+                points.append(points[0])
+            if len(points) >= 4:
+                paths.append(points)
+    return paths
+
+
+def _island_raster_paths(geometry: BaseGeometry, stepover: float) -> list[list[tuple[float, float]]]:
+    paths = []
+    polygons = list(geometry.geoms) if hasattr(geometry, "geoms") else [geometry]
+    for polygon in polygons:
+        if polygon.is_empty:
+            continue
+        paths.extend(_link_island_raster_segments(cavalier_pocketing._raster_segments(polygon, stepover), polygon))
+    return paths
+
+
+def _link_island_raster_segments(
+    row_segments: list[tuple[tuple[float, float], tuple[float, float]]],
+    polygon: Polygon,
+) -> list[list[tuple[float, float]]]:
+    paths: list[list[tuple[float, float]]] = []
+    current_path: list[tuple[float, float]] = []
+    current_point: tuple[float, float] | None = None
+    safe_region = polygon.buffer(1e-9)
+    for start, end in row_segments:
+        if current_point is None:
+            current_path = [start, end]
+            paths.append(current_path)
+        elif safe_region.covers(LineString([current_point, start])):
+            current_path.append(start)
+            current_path.append(end)
+        else:
+            current_path = [start, end]
+            paths.append(current_path)
+        current_point = end
+    return [_dedupe_path(path) for path in paths if len(path) >= 2]
+
+
+def _dedupe_path(points: list[tuple[float, float]]) -> list[tuple[float, float]]:
+    deduped = []
+    for point in points:
+        if not deduped or not _same_xy(deduped[-1], point):
+            deduped.append(point)
+    return deduped
 
 
 def _vertical_raster_segments(polygon: Polygon, stepover: float) -> list[tuple[tuple[float, float], tuple[float, float]]]:

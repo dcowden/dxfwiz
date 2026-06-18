@@ -31,7 +31,7 @@ from dxfwiz.toolpaths.model import ArcMove, LineMove, RapidMove, SourcePath, Too
 from dxfwiz.toolpaths.operations import source_path_points
 
 
-CAMOTICS_RESOLUTION_MM = 1.016
+CAMOTICS_RESOLUTION_MM = 0.508
 EDGE_TOLERANCE_IN = max(0.015, CAMOTICS_RESOLUTION_MM * 3 / 25.4)
 Z_TOLERANCE_IN = max(0.004, CAMOTICS_RESOLUTION_MM * 1.5 / 25.4)
 
@@ -45,9 +45,10 @@ class ExpectedSurfaceRegion:
 @dataclass(frozen=True)
 class CamoticsMesh:
     triangles: int
-    normals: np.ndarray
-    vertices: np.ndarray
-    centers: np.ndarray
+    normal_z: np.ndarray
+    center_xy_in: np.ndarray
+    center_z_in: np.ndarray
+    z_span_mm: np.ndarray
     max_z_mm: float
 
 
@@ -127,10 +128,11 @@ def run_camotics_material_validation(
         encoding="utf-8",
     )
     subprocess.run(
-        [
-            str(camsim),
-            "--resolution",
-            str(CAMOTICS_RESOLUTION_MM),
+            [
+                str(camsim),
+                "--binary",
+                "--resolution",
+                str(CAMOTICS_RESOLUTION_MM),
             "--threads",
             "4",
             artifacts.project_path.name,
@@ -374,37 +376,69 @@ def _append_swept_region(
 
 
 def load_camotics_stl(stl_path: Path) -> CamoticsMesh:
-    data = stl_path.read_bytes()
-    if len(data) < 84:
+    file_size = stl_path.stat().st_size
+    if file_size < 84:
         raise AssertionError(f"{stl_path} is too small to be a binary STL")
-    triangles = struct.unpack_from("<I", data, 80)[0]
+    with stl_path.open("rb") as handle:
+        handle.seek(80)
+        triangles = struct.unpack("<I", handle.read(4))[0]
     expected_size = 84 + triangles * 50
-    if len(data) < expected_size:
+    if file_size < expected_size:
         raise AssertionError(f"{stl_path} is truncated")
     dtype = np.dtype([("normal", "<f4", 3), ("vertices", "<f4", (3, 3)), ("attr", "<u2")])
-    records = np.frombuffer(data, dtype=dtype, count=triangles, offset=84)
-    vertices = records["vertices"].astype(np.float64, copy=False)
+    records = np.memmap(stl_path, dtype=dtype, mode="r", offset=84, shape=(triangles,))
+    vertices = records["vertices"]
     centers = vertices.mean(axis=1)
+    z_values = vertices[:, :, 2]
     return CamoticsMesh(
         triangles=triangles,
-        normals=records["normal"].astype(np.float64, copy=False),
-        vertices=vertices,
-        centers=centers,
-        max_z_mm=float(vertices[:, :, 2].max()),
+        normal_z=np.asarray(records["normal"][:, 2], dtype=np.float32),
+        center_xy_in=np.asarray(centers[:, :2] / 25.4, dtype=np.float32),
+        center_z_in=np.asarray(centers[:, 2] / 25.4, dtype=np.float32),
+        z_span_mm=np.asarray(np.ptp(z_values, axis=1), dtype=np.float32),
+        max_z_mm=float(z_values.max()),
     )
 
 
 def analyze_camotics_stl(mesh: CamoticsMesh, expected_regions: list[ExpectedSurfaceRegion]) -> CamoticsAnalysis:
     horizontal_z_tolerance_mm = max(0.20, CAMOTICS_RESOLUTION_MM * 1.1)
-    center_xy_in = mesh.centers[:, :2] / 25.4
-    center_z_in = mesh.centers[:, 2] / 25.4
-    normal_z = mesh.normals[:, 2]
-    points = shapely.points(center_xy_in[:, 0], center_xy_in[:, 1])
-    expected_z = _expected_surface_z_many(points, expected_regions)
-    boundary_distance = _boundary_distance_many(points, expected_regions)
+    center_xy_in = mesh.center_xy_in
+    center_z_in = mesh.center_z_in
+    normal_z = mesh.normal_z
+    expected_z = np.zeros(mesh.triangles, dtype=np.float32)
+    boundary_distance = np.full(mesh.triangles, np.inf, dtype=np.float32)
 
-    z_span_mm = np.ptp(mesh.vertices[:, :, 2], axis=1)
-    horizontal_mask = (np.abs(normal_z) >= 0.75) & (z_span_mm <= horizontal_z_tolerance_mm)
+    min_depth = min((region.depth_z for region in expected_regions), default=0.0)
+    horizontal_candidates = (np.abs(normal_z) >= 0.75) & (mesh.z_span_mm <= horizontal_z_tolerance_mm)
+    horizontal_ids = _sorted_z_range_ids(
+        horizontal_candidates,
+        center_z_in,
+        min_depth - Z_TOLERANCE_IN,
+        Z_TOLERANCE_IN,
+    )
+    vertical_candidates = (
+        (np.abs(normal_z) <= 0.25)
+        & (center_z_in <= Z_TOLERANCE_IN)
+        & (center_z_in >= min_depth - Z_TOLERANCE_IN)
+    )
+    vertical_ids = _sorted_z_range_ids(
+        vertical_candidates,
+        center_z_in,
+        min_depth - Z_TOLERANCE_IN,
+        Z_TOLERANCE_IN,
+    )
+    query_ids = np.union1d(horizontal_ids, vertical_ids)
+    if len(query_ids):
+        points = shapely.points(center_xy_in[query_ids, 0], center_xy_in[query_ids, 1])
+        expected_z[query_ids] = _expected_surface_z_many(points, expected_regions).astype(np.float32)
+        boundary_distance[query_ids] = _boundary_distance_many_numpy(
+            center_xy_in[query_ids],
+            expected_regions,
+            max(EDGE_TOLERANCE_IN * 3, 0.06),
+        )
+
+    horizontal_mask = np.zeros(mesh.triangles, dtype=bool)
+    horizontal_mask[horizontal_ids] = True
     stock_underside_mask = (expected_z < -1e-9) & (normal_z < -0.75) & (center_z_in < expected_z - Z_TOLERANCE_IN)
     horizontal_mask &= ~stock_underside_mask
     horizontal_mask &= ~((expected_z >= -1e-9) & (normal_z < 0.75))
@@ -421,12 +455,8 @@ def analyze_camotics_stl(mesh: CamoticsMesh, expected_regions: list[ExpectedSurf
     )
 
     wall_search_tolerance = max(EDGE_TOLERANCE_IN * 3, 0.06)
-    min_depth = min((region.depth_z for region in expected_regions), default=0.0)
-    vertical_candidate_mask = (
-        (np.abs(normal_z) <= 0.25)
-        & (center_z_in <= Z_TOLERANCE_IN)
-        & (center_z_in >= min_depth - Z_TOLERANCE_IN)
-    )
+    vertical_candidate_mask = np.zeros(mesh.triangles, dtype=bool)
+    vertical_candidate_mask[vertical_ids] = True
     relevant_wall_mask = (expected_z < -1e-9) | (boundary_distance <= wall_search_tolerance)
     vertical_mask = vertical_candidate_mask & relevant_wall_mask
     wall_ok_mask = vertical_mask & (boundary_distance <= EDGE_TOLERANCE_IN)
@@ -434,7 +464,7 @@ def analyze_camotics_stl(mesh: CamoticsMesh, expected_regions: list[ExpectedSurf
     if not _strict_wall_validation_enabled():
         wall_ok_mask = vertical_mask
         wall_bad_mask = np.zeros(len(vertical_mask), dtype=bool)
-    bad_visual_mask = _expand_xy_mask(
+    bad_visual_mask = _expand_xy_mask_numpy(
         center_xy_in,
         z_bad_mask | material_bad_mask | wall_bad_mask,
         EDGE_TOLERANCE_IN,
@@ -537,12 +567,12 @@ def render_camotics_png(
 def render_camotics_html(name: str, artifacts: CamoticsArtifacts, analysis: CamoticsAnalysis) -> None:
     payload = json.dumps(
         {
-            "stl": base64.b64encode(artifacts.stl_path.read_bytes()).decode("ascii"),
             "colors": analysis.triangle_colors,
         },
         separators=(",", ":"),
     )
     png_href = artifacts.png_path.name
+    stl_href = artifacts.stl_path.name
     html = "\n".join(
         [
             "<!doctype html>",
@@ -564,8 +594,9 @@ def render_camotics_html(name: str, artifacts: CamoticsArtifacts, analysis: Camo
             f'<img src="{escape(png_href)}" alt="{escape(name)} validation map" />',
             "</article>",
             '<article class="card"><h2>interactive STL</h2>',
-            '<div class="stl-viewer" data-stl-id="stl-payload"></div>',
+            f'<div class="stl-viewer" data-stl-id="stl-payload" data-stl-url="{escape(stl_href)}"></div>',
             '<p class="legend"><span><i class="floor"></i>floor</span><span><i class="wall"></i>wall ok</span><span><i class="bad"></i>bad</span><span><i class="stock"></i>stock/edge</span></p>',
+            f'<p class="legend"><a href="{escape(stl_href)}">open STL</a></p>',
             "</article>",
             '<article class="card gcode"><h2>posted G-code</h2>',
             f"<pre>{escape(artifacts.nc_path.read_text(encoding='utf-8'))}</pre>",
@@ -598,6 +629,9 @@ h1 { margin: 0 0 6px; font-size: 24px; }
 .card img { width: 100%; height: 520px; object-fit: contain; display: block; }
 .stl-viewer { width: 100%; height: 520px; background: #0f172a; border-radius: 6px; overflow: hidden; position: relative; }
 .stl-viewer canvas { width: 100%; height: 100%; display: block; }
+.stl-viewer::before { content: "loading STL"; position: absolute; inset: 0; display: grid; place-items: center; color: #cbd5e1; font-size: 12px; letter-spacing: 0.04em; text-transform: uppercase; }
+.stl-viewer.loaded::before { display: none; }
+.stl-viewer.error::before { content: attr(data-error); white-space: pre-line; padding: 18px; text-align: center; line-height: 1.45; text-transform: none; letter-spacing: 0; }
 .legend { display: flex; gap: 10px; flex-wrap: wrap; margin: 8px 0 0; color: #475569; font-size: 12px; }
 .legend span { display: inline-flex; gap: 4px; align-items: center; }
 .legend i { width: 10px; height: 10px; display: inline-block; border-radius: 999px; }
@@ -639,7 +673,12 @@ function applyTriangleColors(geometry, colorsBase64) {
   }
   geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
 }
-function initViewer(container) {
+async function initViewer(container) {
+  if (window.location.protocol === 'file:') {
+    container.dataset.error = 'External STL preview needs this report served over http://localhost.\nRun scripts/serve_toolpath_report.py, then open the printed URL.';
+    container.classList.add('error');
+    return;
+  }
   const payload = JSON.parse(document.getElementById(container.dataset.stlId).textContent);
   const scene = new THREE.Scene();
   scene.background = new THREE.Color(0x0f172a);
@@ -660,7 +699,16 @@ function initViewer(container) {
   const fill = new THREE.DirectionalLight(0x93c5fd, 0.45);
   fill.position.set(-0.8, 0.8, 0.7);
   scene.add(fill);
-  const geometry = new STLLoader().parse(base64ToBytes(payload.stl).buffer);
+  let geometry;
+  try {
+    const response = await fetch(container.dataset.stlUrl);
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    geometry = new STLLoader().parse(await response.arrayBuffer());
+  } catch (error) {
+    container.dataset.error = `Failed to load STL preview.\n${error.message}`;
+    container.classList.add('error');
+    return;
+  }
   geometry.computeVertexNormals();
   geometry.computeBoundingBox();
   applyTriangleColors(geometry, payload.colors);
@@ -689,6 +737,7 @@ function initViewer(container) {
     renderer.render(scene, camera);
     requestAnimationFrame(animate);
   }
+  container.classList.add('loaded');
   animate();
 }
 document.querySelectorAll('.stl-viewer').forEach(initViewer);
@@ -703,6 +752,17 @@ def _expected_surface_z_many(points, regions: list[ExpectedSurfaceRegion]) -> np
     return expected_z
 
 
+def _sorted_z_range_ids(mask: np.ndarray, z_values: np.ndarray, min_z: float, max_z: float) -> np.ndarray:
+    ids = np.flatnonzero(mask)
+    if len(ids) == 0:
+        return ids
+    order = ids[np.argsort(z_values[ids], kind="stable")]
+    sorted_z = z_values[order]
+    start = np.searchsorted(sorted_z, min_z, side="left")
+    end = np.searchsorted(sorted_z, max_z, side="right")
+    return order[start:end]
+
+
 def _boundary_distance_many(points, regions: list[ExpectedSurfaceRegion]) -> np.ndarray:
     if not regions:
         return np.full(len(points), np.inf, dtype=np.float64)
@@ -711,6 +771,141 @@ def _boundary_distance_many(points, regions: list[ExpectedSurfaceRegion]) -> np.
         for region in regions
     ]
     return np.minimum.reduce(distances)
+
+
+def _boundary_distance_many_numpy(
+    point_xy: np.ndarray,
+    regions: list[ExpectedSurfaceRegion],
+    search_radius: float,
+    *,
+    bin_size: float | None = None,
+) -> np.ndarray:
+    segments = _boundary_segment_arrays(regions)
+    if len(point_xy) == 0 or segments is None:
+        return np.full(len(point_xy), np.inf, dtype=np.float32)
+    x0, y0, x1, y1 = segments
+    if bin_size is None:
+        bin_size = max(search_radius * 2.0, 1e-3)
+    min_x = min(float(point_xy[:, 0].min(initial=x0.min())), float(x0.min()), float(x1.min())) - search_radius
+    min_y = min(float(point_xy[:, 1].min(initial=y0.min())), float(y0.min()), float(y1.min())) - search_radius
+    bins = _boundary_segment_bins(x0, y0, x1, y1, search_radius, min_x, min_y, bin_size)
+    result = np.full(len(point_xy), np.inf, dtype=np.float32)
+    point_bin_x = np.floor((point_xy[:, 0] - min_x) / bin_size).astype(np.int32)
+    point_bin_y = np.floor((point_xy[:, 1] - min_y) / bin_size).astype(np.int32)
+    order = np.lexsort((point_bin_y, point_bin_x))
+    sorted_x = point_bin_x[order]
+    sorted_y = point_bin_y[order]
+    if len(order) == 0:
+        return result
+    breaks = np.flatnonzero((sorted_x[1:] != sorted_x[:-1]) | (sorted_y[1:] != sorted_y[:-1])) + 1
+    starts = np.concatenate(([0], breaks))
+    ends = np.concatenate((breaks, [len(order)]))
+    max_pairs = 2_000_000
+    for start, end in zip(starts, ends, strict=True):
+        key = (int(sorted_x[start]), int(sorted_y[start]))
+        segment_ids = bins.get(key)
+        if not segment_ids:
+            continue
+        segment_ids_array = np.asarray(segment_ids, dtype=np.int32)
+        point_ids = order[start:end]
+        point_chunk_size = max(1, max_pairs // max(1, len(segment_ids_array)))
+        for chunk_start in range(0, len(point_ids), point_chunk_size):
+            chunk_ids = point_ids[chunk_start:chunk_start + point_chunk_size]
+            distance_sq = _point_segment_distance_sq_many(
+                point_xy[chunk_ids],
+                x0[segment_ids_array],
+                y0[segment_ids_array],
+                x1[segment_ids_array],
+                y1[segment_ids_array],
+            )
+            min_distance_sq = distance_sq.min(axis=1, initial=np.inf)
+            near = min_distance_sq <= search_radius * search_radius
+            result[chunk_ids[near]] = np.sqrt(min_distance_sq[near]).astype(np.float32)
+    return result
+
+
+def _boundary_segment_arrays(regions: list[ExpectedSurfaceRegion]) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray] | None:
+    rings: list[list[tuple[float, float]]] = []
+    for region in regions:
+        rings.extend(_geometry_boundary_rings(region.geometry))
+    starts: list[tuple[float, float]] = []
+    ends: list[tuple[float, float]] = []
+    for ring in rings:
+        if len(ring) < 2:
+            continue
+        for start, end in zip(ring, ring[1:], strict=False):
+            if math.hypot(end[0] - start[0], end[1] - start[1]) > 1e-12:
+                starts.append(start)
+                ends.append(end)
+    if not starts:
+        return None
+    start_array = np.asarray(starts, dtype=np.float32)
+    end_array = np.asarray(ends, dtype=np.float32)
+    return start_array[:, 0], start_array[:, 1], end_array[:, 0], end_array[:, 1]
+
+
+def _geometry_boundary_rings(geometry: BaseGeometry) -> list[list[tuple[float, float]]]:
+    if geometry.is_empty:
+        return []
+    if hasattr(geometry, "geoms"):
+        rings: list[list[tuple[float, float]]] = []
+        for child in geometry.geoms:
+            rings.extend(_geometry_boundary_rings(child))
+        return rings
+    if hasattr(geometry, "exterior"):
+        return [
+            [(float(x), float(y)) for x, y in geometry.exterior.coords],
+            *[[(float(x), float(y)) for x, y in interior.coords] for interior in geometry.interiors],
+        ]
+    if hasattr(geometry, "coords"):
+        return [[(float(x), float(y)) for x, y in geometry.coords]]
+    return []
+
+
+def _boundary_segment_bins(
+    x0: np.ndarray,
+    y0: np.ndarray,
+    x1: np.ndarray,
+    y1: np.ndarray,
+    padding: float,
+    origin_x: float,
+    origin_y: float,
+    bin_size: float,
+) -> dict[tuple[int, int], list[int]]:
+    bins: dict[tuple[int, int], list[int]] = {}
+    min_bin_x = np.floor((np.minimum(x0, x1) - padding - origin_x) / bin_size).astype(np.int32)
+    max_bin_x = np.floor((np.maximum(x0, x1) + padding - origin_x) / bin_size).astype(np.int32)
+    min_bin_y = np.floor((np.minimum(y0, y1) - padding - origin_y) / bin_size).astype(np.int32)
+    max_bin_y = np.floor((np.maximum(y0, y1) + padding - origin_y) / bin_size).astype(np.int32)
+    for segment_id in range(len(x0)):
+        for bx in range(int(min_bin_x[segment_id]), int(max_bin_x[segment_id]) + 1):
+            for by in range(int(min_bin_y[segment_id]), int(max_bin_y[segment_id]) + 1):
+                bins.setdefault((bx, by), []).append(segment_id)
+    return bins
+
+
+def _point_segment_distance_sq_many(
+    points: np.ndarray,
+    x0: np.ndarray,
+    y0: np.ndarray,
+    x1: np.ndarray,
+    y1: np.ndarray,
+) -> np.ndarray:
+    px = points[:, 0:1]
+    py = points[:, 1:2]
+    dx = x1[None, :] - x0[None, :]
+    dy = y1[None, :] - y0[None, :]
+    length_sq = dx * dx + dy * dy
+    t = np.divide(
+        (px - x0[None, :]) * dx + (py - y0[None, :]) * dy,
+        length_sq,
+        out=np.zeros((len(points), len(x0)), dtype=np.float32),
+        where=length_sq > 1e-12,
+    )
+    t = np.clip(t, 0.0, 1.0)
+    nearest_x = x0[None, :] + t * dx
+    nearest_y = y0[None, :] + t * dy
+    return (px - nearest_x) ** 2 + (py - nearest_y) ** 2
 
 
 def _triangle_colors(
@@ -746,6 +941,54 @@ def _expand_xy_mask(points: np.ndarray, seed_mask: np.ndarray, radius: float) ->
         chunk = points[start : start + chunk_size]
         distances_sq = ((chunk[:, None, :] - seed_points[None, :, :]) ** 2).sum(axis=2)
         expanded[start : start + chunk_size] |= distances_sq.min(axis=1) <= radius_sq
+    return expanded
+
+
+def _expand_xy_mask_numpy(points: np.ndarray, seed_mask: np.ndarray, radius: float) -> np.ndarray:
+    seed_points = points[seed_mask]
+    if len(seed_points) == 0:
+        return seed_mask.copy()
+    bin_size = max(radius, 1e-6)
+    min_x = float(min(points[:, 0].min(), seed_points[:, 0].min())) - radius
+    min_y = float(min(points[:, 1].min(), seed_points[:, 1].min())) - radius
+    seed_bin_x = np.floor((seed_points[:, 0] - min_x) / bin_size).astype(np.int32)
+    seed_bin_y = np.floor((seed_points[:, 1] - min_y) / bin_size).astype(np.int32)
+    seed_bins: dict[tuple[int, int], list[int]] = {}
+    for seed_index, key in enumerate(zip(seed_bin_x, seed_bin_y, strict=True)):
+        seed_bins.setdefault((int(key[0]), int(key[1])), []).append(seed_index)
+
+    point_bin_x = np.floor((points[:, 0] - min_x) / bin_size).astype(np.int32)
+    point_bin_y = np.floor((points[:, 1] - min_y) / bin_size).astype(np.int32)
+    order = np.lexsort((point_bin_y, point_bin_x))
+    sorted_x = point_bin_x[order]
+    sorted_y = point_bin_y[order]
+    expanded = seed_mask.copy()
+    if len(order) == 0:
+        return expanded
+    breaks = np.flatnonzero((sorted_x[1:] != sorted_x[:-1]) | (sorted_y[1:] != sorted_y[:-1])) + 1
+    starts = np.concatenate(([0], breaks))
+    ends = np.concatenate((breaks, [len(order)]))
+    radius_sq = radius * radius
+    max_pairs = 2_000_000
+    for start, end in zip(starts, ends, strict=True):
+        bx = int(sorted_x[start])
+        by = int(sorted_y[start])
+        candidate_seed_ids = [
+            seed_id
+            for nx in range(bx - 1, bx + 2)
+            for ny in range(by - 1, by + 2)
+            for seed_id in seed_bins.get((nx, ny), [])
+        ]
+        if not candidate_seed_ids:
+            continue
+        seed_ids = np.asarray(candidate_seed_ids, dtype=np.int32)
+        point_ids = order[start:end]
+        point_chunk_size = max(1, max_pairs // max(1, len(seed_ids)))
+        for chunk_start in range(0, len(point_ids), point_chunk_size):
+            chunk_ids = point_ids[chunk_start:chunk_start + point_chunk_size]
+            deltas = points[chunk_ids, None, :] - seed_points[seed_ids][None, :, :]
+            near = (deltas * deltas).sum(axis=2).min(axis=1, initial=np.inf) <= radius_sq
+            expanded[chunk_ids[near]] = True
     return expanded
 
 
