@@ -28,6 +28,9 @@ dev = [
 native = [
     "maturin>=1.8,<2.0",
 ]
+gpu = [
+    "taichi>=1.7.4",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

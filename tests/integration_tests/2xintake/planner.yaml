@@ -25,7 +25,7 @@ defaults:
   cut_deeper_than_stock: 0.01
   ideal_screw_distance: 16
   operation_settings:
-    drill_max_diameter: 0.21
+    drill_max_diameter: 0.125
     helical_pocket_max_diameter: 2.0
     pocket_stepover_percent: 40.0
     prefer_arcs: true

@@ -17,6 +17,19 @@ class WorkEnvelope(StrictModel):
     z: AxisRange
 
 
+class AxisMotionLimits(StrictModel):
+    x: float = Field(default=500.0, gt=0)
+    y: float = Field(default=500.0, gt=0)
+    z: float = Field(default=500.0, gt=0)
+
+
+class MachineKinematics(StrictModel):
+    max_velocity: AxisMotionLimits = Field(default_factory=AxisMotionLimits)
+    acceleration: AxisMotionLimits = Field(
+        default_factory=lambda: AxisMotionLimits(x=1000.0, y=1000.0, z=1000.0)
+    )
+
+
 class CoordinateSystem(StrictModel):
     x_positive: Literal["right", "left"]
     y_positive: Literal["up", "down"]
@@ -81,6 +94,7 @@ class Machine(StrictModel):
     workholding: WorkholdingConfig
     part_holding: list[PartHoldingOption]
     work_envelope: WorkEnvelope
+    kinematics: MachineKinematics = Field(default_factory=MachineKinematics)
     coordinate_system: CoordinateSystem
     spindle: Spindle
 

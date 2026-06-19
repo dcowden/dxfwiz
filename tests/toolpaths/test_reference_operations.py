@@ -42,7 +42,7 @@ OUTPUT_DIR = Path(__file__).resolve().parents[1] / "output" / "toolpaths"
 REFERENCE_HTML = OUTPUT_DIR / "reference_operations_gcode_validation.html"
 CAMOTICS_OUTPUT_DIR = OUTPUT_DIR / "camotics_reference"
 CAMOTICS_TIMINGS_CSV = OUTPUT_DIR / "camotics_reference_timings.csv"
-CAMOTICS_RESOLUTION_MM = 0.508
+CAMOTICS_RESOLUTION_MM = 0.254
 CAMOTICS_EDGE_TOLERANCE_IN = max(0.015, CAMOTICS_RESOLUTION_MM * 3 / 25.4)
 CAMOTICS_Z_TOLERANCE_IN = max(0.004, CAMOTICS_RESOLUTION_MM * 1.5 / 25.4)
 

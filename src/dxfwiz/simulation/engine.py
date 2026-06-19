@@ -100,7 +100,7 @@ def simulate_toolpath(request: DexelSimulationRequest, include_snapshot: bool = 
             SimulationIssue(
                 code="W2011",
                 message=(
-                    f"{metrics.excessive_recut_cells} dexels were cut more than twice; "
+                    f"{metrics.excessive_recut_cells} dexels were cut four or more times; "
                     "review toolpath ordering for duplicate passes or mixed-direction contours."
                 ),
             )
@@ -337,7 +337,7 @@ def _metrics(
         overcut_cells=int(np.count_nonzero(overcut)),
         undercut_cells=int(np.count_nonzero(undercut)),
         recut_cells=int(np.count_nonzero(grid.cut_count > 1)),
-        excessive_recut_cells=int(np.count_nonzero(grid.cut_count > 2)),
+        excessive_recut_cells=int(np.count_nonzero(grid.cut_count >= 4)),
         air_cut_moves=air_cut_moves,
         rapid_collision_count=rapid_collision_count,
         unsafe_rapid_count=unsafe_rapid_count,

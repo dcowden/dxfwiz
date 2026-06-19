@@ -32,7 +32,7 @@ from dxfwiz.toolpaths.model import ArcMove, LineMove, RapidMove, SourcePath, Too
 from dxfwiz.toolpaths.operations import source_path_points
 
 
-CAMOTICS_RESOLUTION_MM = 0.508
+CAMOTICS_RESOLUTION_MM = 0.254
 EDGE_TOLERANCE_IN = max(0.015, CAMOTICS_RESOLUTION_MM * 3 / 25.4)
 Z_TOLERANCE_IN = max(0.004, CAMOTICS_RESOLUTION_MM * 1.5 / 25.4)
 

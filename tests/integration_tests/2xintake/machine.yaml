@@ -14,7 +14,16 @@ machine:
   screw_clearance: 0.3
   maximum_plug_size: 0.25
   operation_sort: [tool, group, nest_order]
-  workholding: [clamps, screws, tape]
+  workholding:
+    supported_methods:
+      - method: clamps
+      - method: screws
+        screw_hole_diameter: 0.25
+        screw_grid: 0.75
+        screw_grid_offset: {x: 0, y: 0}
+        screw_clearance: 0.3
+        allow_oversized_holes_to_prevent_toolchange: true
+      - method: tape
   part_holding: [onionskin, tabs]
   work_envelope:
     x: { min: 0, max: 29.5 }    # placeholder — user to fill in

@@ -31,6 +31,8 @@ def build_expected_removals(
     job: JobFile,
     geometry: GeometryFile,
     toolpath_plan: ToolpathPlan | None = None,
+    xy_spacing: float | None = None,
+    arc_chord_fraction: float = 1.0,
 ) -> ExpectedRemovalBuildResult:
     entities = {entity.id: entity for entity in geometry.entities}
     generated = {entity.id: entity for entity in job.generated_entities}
@@ -67,7 +69,7 @@ def build_expected_removals(
             removals.append(removal)
             supported_operation_ids.add(operation.id)
         elif isinstance(operation, ContourOperation | TraceOperation):
-            swept = _swept_line_removals_for_operation(toolpath_plan, operation.id)
+            swept = _swept_line_removals_for_operation(toolpath_plan, operation.id, xy_spacing, arc_chord_fraction)
             if not swept:
                 warnings.append(f"{operation.id}: could not build swept expected removal for {operation.type}")
                 continue
@@ -149,6 +151,8 @@ def _source_paths_by_entity(toolpath_plan: ToolpathPlan | None) -> dict[str, Sou
 def _swept_line_removals_for_operation(
     toolpath_plan: ToolpathPlan | None,
     operation_id: str,
+    xy_spacing: float | None = None,
+    arc_chord_fraction: float = 1.0,
 ) -> list[ExpectedRemoval]:
     if toolpath_plan is None:
         return []
@@ -160,7 +164,7 @@ def _swept_line_removals_for_operation(
         radius = (toolpath_pass.tool_diameter or 0.0) / 2
         if radius <= 0:
             continue
-        position = _append_pass_sweeps(toolpath_pass, position, radius, removals)
+        position = _append_pass_sweeps(toolpath_pass, position, radius, removals, xy_spacing, arc_chord_fraction)
     return removals
 
 
@@ -169,6 +173,8 @@ def _append_pass_sweeps(
     position: tuple[float, float, float],
     radius: float,
     removals: list[ExpectedRemoval],
+    xy_spacing: float | None = None,
+    arc_chord_fraction: float = 1.0,
 ) -> tuple[float, float, float]:
     for move in toolpath_pass.moves:
         if isinstance(move, RapidMove):
@@ -178,7 +184,7 @@ def _append_pass_sweeps(
             _append_sweep(toolpath_pass, position, next_position, radius, removals)
             position = next_position
         elif isinstance(move, ArcMove):
-            points = _arc_points(position, move)
+            points = _arc_points(position, move, xy_spacing, arc_chord_fraction)
             start = position
             for end in points:
                 _append_sweep(toolpath_pass, start, end, radius, removals)
@@ -226,7 +232,12 @@ def _depth_from_z(z: float) -> float:
     return max(0.0, -z)
 
 
-def _arc_points(position: tuple[float, float, float], move: ArcMove) -> list[tuple[float, float, float]]:
+def _arc_points(
+    position: tuple[float, float, float],
+    move: ArcMove,
+    xy_spacing: float | None = None,
+    arc_chord_fraction: float = 1.0,
+) -> list[tuple[float, float, float]]:
     center_x = position[0] + move.i
     center_y = position[1] + move.j
     radius = math.hypot(position[0] - center_x, position[1] - center_y)
@@ -243,7 +254,12 @@ def _arc_points(position: tuple[float, float, float], move: ArcMove) -> list[tup
         if abs(sweep) <= 1e-12 and _same_xy(position, (move.x, move.y)):
             sweep = -2 * math.pi
     arc_length = abs(sweep) * radius
-    steps = max(8, int(math.ceil(arc_length / max(radius / 8, 1e-6))))
+    if xy_spacing is None:
+        chord = max(radius / 8, 1e-6)
+        steps = max(8, int(math.ceil(arc_length / chord)))
+    else:
+        chord = max(xy_spacing * arc_chord_fraction, xy_spacing * 0.1)
+        steps = max(1, int(math.ceil(arc_length / chord)))
     end_z = move.z if move.z is not None else position[2]
     points = []
     for index in range(1, steps + 1):

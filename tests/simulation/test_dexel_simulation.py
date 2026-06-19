@@ -271,7 +271,7 @@ def test_recut_does_not_count_extra_passes_below_stock_thickness():
     assert run.response.metrics.max_cut_count == 1
 
 
-def test_excessive_recut_warns_when_same_area_is_cut_more_than_twice():
+def test_excessive_recut_warns_when_same_area_is_cut_four_or_more_times():
     repeated_moves = [
         {"type": "rapid", "x": 0.3, "y": 1.0, "z": 0.25},
         {"type": "line", "z": -0.1, "feed": 10},
@@ -287,7 +287,7 @@ def test_excessive_recut_warns_when_same_area_is_cut_more_than_twice():
     run = simulate_toolpath(_request([_pass("op-recut", repeated_moves)]))
 
     assert run.response.metrics.excessive_recut_cells > 0
-    assert run.response.metrics.max_cut_count > 2
+    assert run.response.metrics.max_cut_count >= 4
     assert [warning.code for warning in run.response.warnings] == ["W2011"]
 
 
