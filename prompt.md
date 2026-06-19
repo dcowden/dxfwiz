@@ -21,6 +21,41 @@ Role onboarding is part of the product. When a user first sets up as a designer,
 
 The long-term web app should support live collaboration: when one person changes geometry intent, operation inputs, tool policy, warnings, or plan review status, other collaborators should be able to see that change in the same job context.
 
+## Part Requests And Machine Jobs
+
+In practical shop work, the workflow starts before CAM planning. A customer/student/teammate usually provides:
+
+- a source part file
+- the quantity wanted
+- the material
+
+This should be modeled as a `part_request`. A part request is demand for one kind of part, not yet a machine setup. The source file may be:
+
+- 2D DXF, where geometry can be extracted but stock thickness and pocket intent usually require user input
+- 3D STEP, where stock thickness and pocket/cutout intent can often be derived from the model
+
+Each part request should produce a geometry output YAML file. For DXF requests, the system should preserve the current DXF cleanup and `geom.yaml` path, then ask for missing manufacturing intent such as thickness and which entities are pockets. For STEP requests, future import should derive 2.5D-relevant geometry, stock thickness, through features, pocket depths, and candidate machining intent where possible, while still presenting the result for operator review.
+
+A `machine_job` is a single run on the CNC router. A machine job is often made from several part requests nested onto one stock sheet. This differs from the current `job.yaml` operation plan concept; when needed, use names such as `machine_job.yaml` or `nested_job.yaml` for the sheet/run-level object, and reserve operation-plan files for machining operations.
+
+Creating a machine job from part requests means:
+
+1. Expanding each part request into one placed part instance per requested quantity.
+2. Nesting those instances onto a stock rectangle with practical spacing and rotation rules.
+3. Drawing a rectangular stock/frame around the nested parts.
+4. Writing a new combined DXF representing the machine job.
+5. Generating geometry outputs for the combined job so the ordinary planning/toolpath flow can continue.
+
+The first implementation does not need perfect nesting. The operator is expected to review and adjust the layout before cutting. The goal is to remove the repetitive manual work of duplicating parts, arranging them roughly, and drawing the stock frame. Future UI should allow direct manipulation of nested parts with simple drag-and-drop, rotate, and stock frame resize controls. The final reviewed output should be another DXF that can be cleaned, recognized, planned, and cut like any other job.
+
+Initial material catalog:
+
+- `quarter_in_plywood`: 1/4 in plywood
+- `half_in_plywood`: 1/2 in plywood
+- `quarter_in_polycarbonate`: 1/4 in polycarbonate
+
+Materials should be structured data, not free text. The model should include at least display name, category, thickness, units, and machine/planner material key. Later versions can add sheet inventory, preferred tools, feeds/speeds advice, cost, vendor SKU, grain direction, protective film, and minimum spacing.
+
 ## Current Flow
 
 1. User uploads a DXF.
@@ -33,7 +68,59 @@ The long-term web app should support live collaboration: when one person changes
 
 For now, the NiceGUI app stops after generating `geom.yaml`.
 
+The next workflow layer is part-request intake and machine-job creation. A user should be able to define several part requests and ask the system to produce a combined nested job DXF. That generated job DXF then enters the existing cleanup/geometry/planning pipeline.
+
 ## YAML Files
+
+### `part_request.yaml` / Future Part Request Model
+
+Represents demand for a part before it has been assigned to a machine run.
+
+Expected fields:
+
+- stable id/name
+- source file path or uploaded-file reference
+- source file type: `dxf` or `step`
+- quantity
+- material id from the material catalog
+- optional customer/project/request metadata
+- derived or user-supplied thickness
+- geometry output path
+- DXF-specific intent overrides, such as which entities are pockets
+- STEP-derived intent, such as through profiles, pockets, and depths
+- validation status and warnings
+
+Part request models should be Pydantic schemas first. They should not require a UI to be useful; tests and command-line workflows should be able to build machine jobs from model instances.
+
+### `materials.yaml` / Future Material Catalog
+
+Lists known material choices available at request time.
+
+Initial entries:
+
+- 1/4 plywood
+- 1/2 plywood
+- 1/4 polycarbonate
+
+The catalog should use stable ids and structured thickness values. Display strings are for humans; planner logic should use ids and typed fields.
+
+### `machine_job.yaml` / Future Nested Machine Run
+
+Represents one CNC-router run produced from one or more part requests.
+
+Expected fields:
+
+- stable job id/name
+- material id
+- stock shape and size
+- part instances, each linking back to a part request
+- transform for each placed instance: translation, rotation, optional mirror flag
+- spacing/kerf/clearance policy used by the nester
+- generated combined DXF path
+- generated combined `geom.yaml` path
+- review status, because operator review is expected before cutting
+
+Machine-job creation should be deterministic and reviewable. Given the same part requests, material, stock constraints, and nesting settings, it should produce the same proposed layout unless the operator changes it.
 
 ### `machine.yaml`
 
@@ -373,6 +460,9 @@ This local filesystem implementation is temporary. Design the boundary so later 
 
 A bundle should include everything required to continue the job elsewhere:
 
+- part request definitions and source files, when the bundle starts from requested parts
+- material catalog entries used by the job
+- nested machine-job definition, if the job was formed from multiple part requests
 - original DXF/SVG
 - fixed DXF/SVG
 - `geom.yaml`
@@ -388,6 +478,9 @@ Current direction:
 
 - Use SVG for display/diagnostics.
 - Use Shapely and pyclipper/Clipper-style algorithms where appropriate.
+- Use polygon nesting heuristics for machine-job layout. Start with deterministic, inspectable placement rather than trying to solve perfect nesting.
+- For the first nester, support translation and 90-degree rotations. Later versions can add arbitrary-angle rotation, grain constraints, tabs/fixture-aware spacing, and operator-locked placements.
+- Preserve part-instance identity through nesting so warnings, operations, and generated gcode can be traced back to the originating part request.
 - Use Kiri:Moto as a reference for toolpath behavior, especially pocketing and ramping.
 - Be careful with licenses. GPL code used only behind a web app generally does not trigger distribution the way AGPL does, but this must be considered carefully if code is reused or ported.
 - Use a NumPy-backed dexel simulator for material-removal testing. Internally, `actual_depth` is positive depth removed below stock top. The simulator must keep `expected_depth`, `actual_depth`, `cut_count`, and `last_operation_id`, and its request/response boundary must stay stateless so it can later run behind a separate service.
@@ -455,6 +548,9 @@ Implemented so far:
 
 Next major work:
 
+- define Pydantic schemas for part requests, material catalog entries, and nested machine jobs
+- generate combined job DXFs from multiple part requests and quantities
+- implement a first deterministic nesting strategy with operator-review-friendly outputs
 - improve UI polish and interaction
 - add operation-plan generation flow
 - define `op.yaml`
