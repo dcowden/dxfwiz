@@ -32,7 +32,7 @@ from dxfwiz.toolpaths.model import ArcMove, LineMove, RapidMove, SourcePath, Too
 from dxfwiz.toolpaths.operations import source_path_points
 
 
-CAMOTICS_RESOLUTION_MM = 0.254
+CAMOTICS_RESOLUTION_MM = 0.508
 EDGE_TOLERANCE_IN = max(0.015, CAMOTICS_RESOLUTION_MM * 3 / 25.4)
 Z_TOLERANCE_IN = max(0.004, CAMOTICS_RESOLUTION_MM * 1.5 / 25.4)
 
@@ -97,7 +97,7 @@ def run_camotics_material_validation(
     output_dir: Path,
     stock_bounds: tuple[float, float, float, float] | None = None,
     operation_ids: set[str] | None = None,
-    timeout_seconds: int = 60,
+    timeout_seconds: int | None = None,
 ) -> tuple[CamoticsArtifacts, CamoticsAnalysis]:
     camsim = find_camsim()
     if camsim is None:
@@ -143,7 +143,7 @@ def run_camotics_material_validation(
         check=True,
         capture_output=True,
         text=True,
-        timeout=timeout_seconds,
+        timeout=timeout_seconds or _camotics_timeout_seconds(),
     )
 
     mesh = load_camotics_stl(artifacts.stl_path)
@@ -154,13 +154,22 @@ def run_camotics_material_validation(
 
 
 def _camotics_thread_count() -> int:
-    value = os.environ.get("DXFWIZ_CAMOTICS_THREADS")
+    return _positive_env_int("DXFWIZ_CAMOTICS_THREADS", 6)
+
+
+def _camotics_timeout_seconds() -> int:
+    return _positive_env_int("DXFWIZ_CAMOTICS_TIMEOUT_SECONDS", 600)
+
+
+def _positive_env_int(name: str, default: int) -> int:
+    value = os.environ.get(name)
     if value is None:
-        return 6
+        return default
     try:
-        return max(1, int(value))
+        parsed = int(value)
     except ValueError:
-        return 4
+        return default
+    return max(1, parsed)
 
 
 def find_camsim() -> Path | None:

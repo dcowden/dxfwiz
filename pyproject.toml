@@ -34,7 +34,9 @@ gpu = [
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-m 'not integration'"
+filterwarnings = [
+    "ignore:'locale\\.getdefaultlocale' is deprecated.*:DeprecationWarning:taichi\\._lib\\.utils",
+]
 markers = [
     "integration: slow real-DXF and CAMotics integration tests",
 ]
